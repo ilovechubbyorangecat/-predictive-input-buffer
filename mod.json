@@ -8,8 +8,8 @@
 	},
 	"version": "v3.2.0",
 	"id": "basu.input-buffer",
-	"name": "Click Before Frames",
-	"developer": "BASU",
+	"name": "Autoplay",
+	"developer": "Indonesiangamer777",
 	"description": "Autoplay for level showcases: plans a route while it plays, plays GDR / xdBot macros and runs shared on the global brain. Test mode: nothing is saved as progress. github.com/raresdalas1009/-predictive-input-buffer",
 	"settings": {
 		"autoplay-label": {
@@ -111,7 +111,7 @@
 		"online-players": {
 			"type": "bool",
 			"name": "Show Online Players",
-			"description": "Shows how many Click Before Frames players are online in the window's footer. To count you, every 90 seconds the game sends the Click Before Frames server an anonymous random id, your device type and the mod's version. No name, account, level or gameplay. Turn it off and nothing is sent.",
+			"description": "Shows how many Autoplay players are online in the window's footer. To count you, every 90 seconds the game sends the Click Before Frames server an anonymous random id, your device type and the mod's version. No name, account, level or gameplay. Turn it off and nothing is sent.",
 			"default": true
 		},
 		"check-updates": {

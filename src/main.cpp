@@ -1,4 +1,4 @@
-// Click Before Frames: autoplay.
+// Autoplay, by Indonesiangamer777.
 //
 // Autoplay plays a level for showcases (test mode: nothing is saved as progress, and AUTOPLAY
 // stays on screen). A hidden "ghost" player is simulated ahead of you: the route planner and
@@ -293,7 +293,7 @@ namespace {
         if (starts("macro") || starts("autoplay: macro")) return { 90, 220, 255 };
         if (starts("brain") || starts("autoplay: brain") || starts("account")) return { 255, 150, 220 };
         if (starts("trigger") || starts("step check") || starts("portal check")) return { 255, 240, 150 };
-        if (starts("Click") || starts("update")) return { 255, 215, 90 };
+        if (starts("Autoplay v") || starts("update")) return { 255, 215, 90 };
         if (starts("console")) return { 150, 255, 200 };
         return { 255, 255, 255 };
     }
@@ -347,7 +347,7 @@ namespace {
             buf.logLines.pop_front();
         }
         if (buf.console) {
-            std::printf("[ClickBeforeFrames] %s\n", msg.c_str());
+            std::printf("[Autoplay] %s\n", msg.c_str());
         }
         // v2.71: redrawn once per physics step instead of on every line (a click that logs
         // 4 lines rebuilt all 8 labels 4 times)
@@ -600,7 +600,7 @@ namespace {
         auto* mod = Mod::get();
         auto* layer = GameManager::get()->m_playLayer;
         std::string text;
-        text += fmt::format("Click Before Frames {} console export\n", mod->getVersion().toVString());
+        text += fmt::format("Autoplay {} console export\n", mod->getVersion().toVString());
         if (layer && layer->m_level) {
             text += fmt::format("Level: {} (id {}){}\n", std::string(layer->m_level->m_levelName), layer->m_level->m_levelID.value(),
                 layer->m_isPracticeMode ? ", practice" : "");
@@ -3992,7 +3992,7 @@ namespace online {
                     if (v["found"].asBool().unwrapOr(false) && v["inputs"].isArray()) {
                         Macro m;
                         m.file = "global brain run";
-                        m.bot = "Click Before Frames";
+                        m.bot = "Autoplay";
                         m.fps = tps;
                         m.levelId = levelId;
                         confirms = static_cast<int>(v["confirms"].asInt().unwrapOr(1));
@@ -9368,13 +9368,13 @@ $on_mod(Loaded) {
         AllocConsole();
         FILE* out = nullptr;
         freopen_s(&out, "CONOUT$", "w", stdout);
-        SetConsoleTitleA("Click Before Frames - Live Console");
+        SetConsoleTitleA("Autoplay - Live Console");
     }
 #endif
     if (Loader::get()->isModLoaded("syzzi.click_between_frames")) {
         cbfRestore();  // test 78: if the game closed while a macro had it off
     }
-    say("Click Before Frames {} loaded (autoplay)", Mod::get()->getVersion().toVString());
+    say("Autoplay {} loaded", Mod::get()->getVersion().toVString());
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
@@ -9539,7 +9539,7 @@ class $modify(BufPlayLayer, PlayLayer) {
             buf.panel->addChild(frame);
         }
 
-        auto* title = CCLabelBMFont::create("Click Before Frames", "goldFont.fnt");
+        auto* title = CCLabelBMFont::create("Autoplay", "goldFont.fnt");
         title->setScale(0.55f);
         title->setAnchorPoint({ 0.f, 0.5f });
         title->setPosition({ 10.f, H - 14.f });
@@ -10141,7 +10141,7 @@ namespace {
             auto data = std::move(file).data();
             auto version = packageVersion(data);
             if (version.isErr()) {
-                return fail("The downloaded file isn't a valid Click Before Frames build.");
+                return fail("The downloaded file isn't a valid Autoplay build.");
             }
             auto newVersion = version.unwrap();
             if (!(newVersion > Mod::get()->getVersion())) {
@@ -10163,7 +10163,7 @@ namespace {
         }
         updateShown = true;
         say("update: {} is out (you have {})", latestVersion, Mod::get()->getVersion().toVString());
-        createQuickPopup("Click Before Frames", fmt::format("<cp>{}</c> is out! You have {}.{}", latestVersion,
+        createQuickPopup("Autoplay", fmt::format("<cp>{}</c> is out! You have {}.{}", latestVersion,
             Mod::get()->getVersion().toVString(), latestNotes.empty() ? std::string() : "\n\n" + latestNotes), "Later", INSTALL_UPDATES ? "Update now" : "Open page", [](FLAlertLayer*, bool yes) {
                 if (!yes) {
                     return;

@@ -1,4 +1,6 @@
-# Click Before Frames (Geode)
+# Autoplay (Geode)
+
+By Indonesiangamer777.
 
 Autoplay for level showcases. That is all this mod does now: the input buffer (delayed clicks, stages, auto-release, level memory, path view, training hints, stats, heatmap) has been removed.
 
