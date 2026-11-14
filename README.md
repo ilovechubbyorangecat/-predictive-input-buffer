@@ -21,13 +21,11 @@ The keys can be changed in the mod's settings or in Geode's keybinds popup. The 
 ## The window
 - **Log**: what autoplay did, with Copy Log and the on-screen console.
 - **Autoplay**: start / stop, Take Over, Forget Level, and the macro and global brain switches (Choose Macro, Macros Folder, Forget Macro).
-- **Account**: link the game to your Discord on the Click Before Frames site, and your autoplay's stats. Autoplay and updates need the game linked.
 - **Settings** (the gear): window size and opacity, the pause menu button, Physics TPS, the prediction switches and updates.
 
 ## Online (each can be turned off in the settings)
 - An anonymous id with your device type and version every 90 s (the online counter).
 - Autoplay's finished runs (the level and the button presses), for the global brain.
-- Linking the game to your Discord on the site.
 - Macro downloads.
 
 ## Settings

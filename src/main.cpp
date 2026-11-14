@@ -291,7 +291,7 @@ namespace {
         if (starts("autoplay died") || starts("  you hit") || starts("  the object")) return { 255, 120, 120 };
         if (starts("route") || starts("  route")) return { 255, 180, 80 };
         if (starts("macro") || starts("autoplay: macro")) return { 90, 220, 255 };
-        if (starts("brain") || starts("autoplay: brain") || starts("account")) return { 255, 150, 220 };
+        if (starts("brain") || starts("autoplay: brain")) return { 255, 150, 220 };
         if (starts("trigger") || starts("step check") || starts("portal check")) return { 255, 240, 150 };
         if (starts("Autoplay v") || starts("update")) return { 255, 215, 90 };
         if (starts("console")) return { 150, 255, 200 };
@@ -2397,140 +2397,6 @@ namespace online {
     }
 }
 
-    // ===== test 91: your account (a game linked to your Discord on the CBF site) =====
-    namespace account {
-        struct Stats {
-            bool loaded = false;
-            bool linked = false;
-            std::string name;
-            int games = 0, levelsBeaten = 0, finishes = 0, runsShared = 0, othersUsed = 0;
-            std::vector<std::string> recent;
-        };
-        Stats stats;
-        bool dirty = false;      // the window shows it again
-        bool linking = false;
-        std::string code;        // the code the browser shows while linking
-        std::string status;
-
-        // test 92: autoplay and updates need this game linked to Discord on the CBF site (checked with
-        // the site at start; the last answer is kept for when it can't be reached)
-        bool isLinked() {
-            if (stats.loaded) {
-                return stats.linked;
-            }
-            return !Mod::get()->getSavedValue<std::string>("account-name", "").empty();
-        }
-
-        void refresh() {
-            if (std::string_view(online::URL).empty()) {
-                return;
-            }
-            std::string url = fmt::format("{}/api/account?id={}", online::URL, online::id());
-            std::thread([url] {
-                auto res = web::WebRequest().timeout(std::chrono::seconds(15)).userAgent("ClickBeforeFrames").getSync(url);
-                Stats st;
-                if (res.ok()) {
-                    if (auto j = res.json(); j.isOk()) {
-                        auto v = j.unwrap();
-                        st.loaded = true;
-                        st.linked = v["linked"].asBool().unwrapOr(false);
-                        st.name = v["name"].asString().unwrapOr("");
-                        st.games = static_cast<int>(v["games"].asInt().unwrapOr(1));
-                        st.levelsBeaten = static_cast<int>(v["levelsBeaten"].asInt().unwrapOr(0));
-                        st.finishes = static_cast<int>(v["finishes"].asInt().unwrapOr(0));
-                        st.runsShared = static_cast<int>(v["runsShared"].asInt().unwrapOr(0));
-                        st.othersUsed = static_cast<int>(v["othersFinishedWithYours"].asInt().unwrapOr(0));
-                        if (v["recent"].isArray()) {
-                            for (auto const& r : v["recent"]) {
-                                st.recent.push_back(r["name"].asString().unwrapOr("?"));
-                            }
-                        }
-                    }
-                }
-                queueInMainThread([st] {
-                    if (st.loaded) {
-                        stats = st;
-                        Mod::get()->setSavedValue("account-name", st.linked ? st.name : std::string());
-                    }
-                    else {
-                        status = "Couldn't reach the CBF site.";
-                    }
-                    dirty = true;
-                });
-            }).detach();
-        }
-
-        // the game gets a code, the browser opens the site's link page, and the game asks every 3 s
-        // whether you pressed Link there (for 10 minutes)
-        void startLink() {
-            if (linking || std::string_view(online::URL).empty()) {
-                return;
-            }
-            linking = true;
-            status = "Opening the CBF site...";
-            dirty = true;
-            std::string body = fmt::format(R"({{"id":"{}"}})", online::id());
-            std::thread([body] {
-                auto res = web::WebRequest().timeout(std::chrono::seconds(15)).userAgent("ClickBeforeFrames").header("Content-Type", "application/json")
-                    .bodyString(body).postSync(std::string(online::URL) + "/api/link/start");
-                std::string c, url;
-                if (res.ok()) {
-                    if (auto j = res.json(); j.isOk()) {
-                        c = j.unwrap()["code"].asString().unwrapOr("");
-                        url = j.unwrap()["url"].asString().unwrapOr("");
-                    }
-                }
-                if (c.empty()) {
-                    queueInMainThread([] {
-                        linking = false;
-                        status = "Couldn't reach the CBF site.";
-                        dirty = true;
-                    });
-                    return;
-                }
-                queueInMainThread([c, url] {
-                    code = c;
-                    status = fmt::format("Log in with Discord in the browser and press Link (code {}).", c);
-                    dirty = true;
-                    web::openLinkInBrowser(url);
-                });
-                for (int i = 0; i < 200; ++i) {
-                    std::this_thread::sleep_for(std::chrono::seconds(3));
-                    auto p = web::WebRequest().timeout(std::chrono::seconds(10)).userAgent("ClickBeforeFrames")
-                        .getSync(fmt::format("{}/api/link/poll?code={}", online::URL, c));
-                    if (!p.ok()) {
-                        continue;
-                    }
-                    auto j = p.json();
-                    if (j.isErr()) {
-                        continue;
-                    }
-                    auto v = j.unwrap();
-                    if (v["linked"].asBool().unwrapOr(false)) {
-                        std::string name = v["name"].asString().unwrapOr("");
-                        queueInMainThread([name] {
-                            linking = false;
-                            code.clear();
-                            status = "Linked to " + name + ".";
-                            say("account: this game is linked to {} on the CBF site", name);
-                            refresh();
-                        });
-                        return;
-                    }
-                    if (v["expired"].asBool().unwrapOr(false)) {
-                        break;
-                    }
-                }
-                queueInMainThread([] {
-                    linking = false;
-                    code.clear();
-                    status = "The code ran out. Press Link with Discord again.";
-                    dirty = true;
-                });
-            }).detach();
-        }
-    }
-
     // test 91: the CBF icon, sized to a game button
     CCSprite* cbfIcon(float size) {
         auto* s = CCSprite::create("cbf-icon.png"_spr);
@@ -4262,10 +4128,6 @@ namespace online {
         }
         if (layer->m_isPlatformer) {
             *why = "Autoplay doesn't do platformer levels.";
-            return false;
-        }
-        if (!account::isLinked()) {
-            *why = "Autoplay needs this game linked to your Discord on the Click Before Frames site: open the menu, go to Account and press Link with Discord.";
             return false;
         }
         // test 85: 2-player levels are allowed: a macro plays both players (test 84); without one,
@@ -7763,10 +7625,9 @@ class AutoplayMenu : public geode::Popup {
         { "drift-check", "Route Step Check", "Debug: the hidden player's step next to yours" },
         { "explain-inputs", "Log Trigger Checks", "Debug: every trigger self-check in the Log" },
     };
-    static constexpr char const* TABS[] = { "Log", "Autoplay", "Account" };
+    static constexpr char const* TABS[] = { "Log", "Autoplay" };
     static constexpr int TAB_AUTOPLAY = 1;
-    static constexpr int TAB_ACCOUNT = 2;
-    static constexpr int TAB_SETTINGS = 3;
+    static constexpr int TAB_SETTINGS = 2;
 
     struct Theme {
         ccColor3B main, soft, accent, bg;
@@ -8560,62 +8421,6 @@ private:
         button(m_pageMenu, "Forget Macro", menu_selector(AutoplayMenu::onForgetMacro), { rx + 14.f + bw * 1.5f, FOOT + 20.f }, bw);
     }
 
-    // test 91: your account: link this game to your Discord on the CBF site, and your autoplay's stats
-    void pageAccount() {
-        pageTitle("Account");
-        float x = contentX(), w = contentW(), top = contentTop();
-        float colW = (w - 6.f) / 2.f;
-        auto const& st = account::stats;
-        if (!st.loaded && account::status.empty()) {
-            account::refresh();
-        }
-        card({ x, FOOT + 6.f, colW, top - FOOT - 6.f }, "Your account", "CBF site");
-        std::string savedName = Mod::get()->getSavedValue<std::string>("account-name", "");
-        bool linked = st.loaded ? st.linked : !savedName.empty();
-        std::string name = st.loaded ? st.name : savedName;
-        float y = top - 34.f;
-        if (linked) {
-            label(m_page, name, 0.75f, m_text, { x + colW / 2.f, y - 6.f })->limitLabelWidth(colW - 20.f, 0.75f, 0.2f);
-            label(m_page, "linked with Discord", 0.36f, m_cyan, { x + colW / 2.f, y - 26.f });
-            if (st.games > 1) {
-                label(m_page, fmt::format("{} games linked to it", st.games), 0.34f, m_muted, { x + colW / 2.f, y - 40.f });
-            }
-        }
-        else {
-            label(m_page, "Link this game to your Discord", 0.42f, m_text, { x + colW / 2.f, y }) ->limitLabelWidth(colW - 20.f, 0.42f, 0.15f);
-            label(m_page, "to see your stats here and on the site.", 0.36f, m_muted, { x + colW / 2.f, y - 13.f })->limitLabelWidth(colW - 20.f, 0.36f, 0.15f);
-            button(m_pageMenu, account::linking ? "Waiting for the browser..." : "Link with Discord", menu_selector(AutoplayMenu::onLinkAccount),
-                { x + colW / 2.f, y - 42.f }, colW - 24.f, !account::linking, 0, 22.f, ccColor3B { 88, 101, 242 });
-        }
-        if (!account::status.empty()) {
-            label(m_page, account::status, 0.32f, m_muted, { x + colW / 2.f, FOOT + 46.f })->limitLabelWidth(colW - 16.f, 0.32f, 0.12f);
-        }
-        float bw = (colW - 22.f) / 2.f;
-        button(m_pageMenu, "Refresh", menu_selector(AutoplayMenu::onAccountRefresh), { x + 8.f + bw / 2.f, FOOT + 20.f }, bw);
-        button(m_pageMenu, "Open Site", menu_selector(AutoplayMenu::onOpenSite), { x + 14.f + bw * 1.5f, FOOT + 20.f }, bw);
-
-        float rx = x + colW + 6.f;
-        card({ rx, FOOT + 6.f, colW, top - FOOT - 6.f }, "Your autoplay", "global brain");
-        auto stat = [&](float yy, std::string const& n, std::string const& what) {
-            label(m_page, n, 0.7f, m_text, { rx + 12.f, yy }, { 0.f, 0.5f });
-            label(m_page, what, 0.34f, m_muted, { rx + 58.f, yy }, { 0.f, 0.5f })->limitLabelWidth(colW - 66.f, 0.34f, 0.12f);
-        };
-        float sy = top - 36.f;
-        stat(sy, fmt::format("{}", st.levelsBeaten), "levels beaten 0-100");
-        stat(sy - 24.f, fmt::format("{}", st.runsShared), "runs you shared first");
-        stat(sy - 48.f, fmt::format("{}", st.othersUsed), "finishes by others with your runs");
-        stat(sy - 72.f, fmt::format("{}", st.finishes), "runs finished in all");
-        if (!st.recent.empty()) {
-            std::string list;
-            for (size_t i = 0; i < st.recent.size() && i < 3; ++i) {
-                list += (i ? ", " : "") + st.recent[i];
-            }
-            label(m_page, "Lately: " + list, 0.32f, m_muted, { rx + colW / 2.f, FOOT + 22.f })->limitLabelWidth(colW - 16.f, 0.32f, 0.12f);
-        }
-        else if (!st.loaded) {
-            label(m_page, "Loading...", 0.34f, m_muted, { rx + colW / 2.f, FOOT + 22.f });
-        }
-    }
 
     void pageSettings() {
         pageTitle("Settings");
@@ -8682,7 +8487,6 @@ private:
 
         switch (s_tab) {
             case 0: pageLog(); break;
-            case TAB_ACCOUNT: pageAccount(); break;
             case TAB_SETTINGS: pageSettings(); break;
             default: pageAutoplay(); break;
         }
@@ -8892,12 +8696,6 @@ private:
         if (m_onlineTimer > 1.f) {
             m_onlineTimer = 0.f;
             refreshOnline();
-        }
-        if (account::dirty) {
-            account::dirty = false;
-            if (s_tab == TAB_ACCOUNT) {
-                rebuildPage();  // test 91: the account page shows what just came in
-            }
         }
         // v3.2: the static moves, the logo eye looks at the cursor and blinks, eyes show up in the snow
         m_staticT += dt;
@@ -9117,28 +8915,8 @@ private:
         rebuildPage();
     }
 
-    // test 91: account
-    void onLinkAccount(CCObject*) {
-        account::startLink();
-        rebuildPage();
-    }
-
-    void onAccountRefresh(CCObject*) {
-        account::status.clear();
-        account::refresh();
-    }
-
-    void onOpenSite(CCObject*) {
-        web::openLinkInBrowser(std::string(online::URL));
-    }
-
     // test 90: check for / install the newest version
     void onUpdates(CCObject*) {
-        if (!account::isLinked()) {
-            s_tab = s_back = TAB_ACCOUNT;  // test 92: link first
-            rebuildPage();
-            return;
-        }
         manualUpdate();
         rebuildPage();
     }
@@ -9211,10 +8989,6 @@ private:
         }
         std::string why;
         if (!startAutoplay(&why)) {
-            if (!account::isLinked()) {
-                s_tab = s_back = TAB_ACCOUNT;  // test 92: straight to where you link
-                rebuildPage();
-            }
             FLAlertLayer::create("Autoplay", why, "OK")->show();
             return;
         }
@@ -10188,18 +9962,11 @@ namespace {
         if (updating) {
             return "Updating...";
         }
-        if (!account::isLinked()) {
-            return "Updates: Link Account";
-        }
         return updateAvailable() ? "Update to " + latestVersion : std::string("Check for Updates");
     }
 
     void manualUpdate() {
         if (updating) {
-            return;
-        }
-        if (!account::isLinked()) {
-            say("update: link this game to your Discord first (Account tab)");
             return;
         }
         if (updateAvailable()) {
@@ -10216,9 +9983,6 @@ namespace {
     void checkForUpdate() {
         if (updateChecked || (!updateAnywhere && !Mod::get()->getSettingValue<bool>("check-updates"))) {
             return;
-        }
-        if (!account::isLinked()) {
-            return;  // test 92: updates are for linked games
         }
         updateChecked = true;
         // v2.98: the check reads the newest GitHub release, the same file "Update now" installs
@@ -10312,7 +10076,6 @@ $on_mod(Loaded) {
     CBF_STEP("loaded: keybinds");
     setupKeybinds();
     online::start();
-    account::refresh();  // test 92: is this game linked (autoplay and updates need it)
     CBF_STEP("loaded: keybinds done");
     // v2.99.3: shows in the log whether the game reaches its first frame (iOS start crash hunt)
     queueInMainThread([] { CBF_STEP("first frame"); });
