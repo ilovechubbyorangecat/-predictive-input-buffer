@@ -10,12 +10,12 @@
 	"id": "cat.autoplay",
 	"name": "Autoplay",
 	"developer": "Indonesiangamer777",
-	"description": "Autoplay for level showcases: plans a route while it plays, plays GDR / xdBot macros and runs shared on the global brain. Test mode: nothing is saved as progress. github.com/ilovechubbyorangecat/-predictive-input-buffer",
+	"description": "Autoplay for level showcases: plans a route while it plays, plays GDR / xdBot macros and runs shared on the global brain. Cycle mode makes it learn a level like a player. Safe Mode keeps what it plays from being saved. github.com/ilovechubbyorangecat/-predictive-input-buffer",
 	"settings": {
 		"autoplay-label": {
 			"type": "string",
 			"name": "Autoplay Label",
-			"description": "The AUTOPLAY label is always on screen while autoplay plays, so a recording can't pass as a real run. Big: at the top. Small: a small see-through label in the bottom corner, for showcases.",
+			"description": "Where the AUTOPLAY label is while autoplay plays. Big: at the top. Small: a small see-through label in the bottom corner, for showcases. Hide Autoplay Text removes it.",
 			"default": "Big",
 			"one-of": [
 				"Big",
@@ -27,6 +27,163 @@
 			"name": "Show Autoplay Trail",
 			"description": "Draws the path autoplay plans (and its inputs) on the level. Off for clean showcase recordings; autoplay plays the same either way.",
 			"default": false
+		},
+		"utilities-title": {
+			"type": "title",
+			"name": "Bot utilities"
+		},
+		"hide-autoplay-text": {
+			"type": "bool",
+			"name": "Hide Autoplay Text",
+			"description": "Hides the AUTOPLAY label while autoplay plays. Works with or without Cycle.",
+			"default": false
+		},
+		"safe-mode": {
+			"type": "bool",
+			"name": "Safe Mode",
+			"description": "On: while autoplay is on, the level is in the game's test mode, so no completion, progress percentage or stats are saved to your account. Off: the game saves what autoplay does as if you had played it. Works with or without Cycle.",
+			"default": true
+		},
+		"cycle-title": {
+			"type": "title",
+			"name": "Cycle (learn like a player)"
+		},
+		"cycle-enabled": {
+			"type": "bool",
+			"name": "Cycle Mode",
+			"description": "Autoplay plays like a player learning the level: it starts as a beginner, makes mistakes and dies, and gets further and more consistent with every attempt. What it practiced from a start position is remembered when it plays from 0%. Its memory is kept per level until you reset it (Reset Cycle in the Autoplay window).",
+			"default": false
+		},
+		"cycle-preset": {
+			"type": "string",
+			"name": "Cycle preset",
+			"description": "How fast it learns. Rookie: struggles heavily, many attempts even for the first percents. Casual: a relaxed, steady pace. Grinder: balanced, builds consistency. Prodigy: adapts quickly and remembers start position practice fast. Demon Slayer: rapid mastery, few deaths. Custom: the numbers below.",
+			"default": "Casual",
+			"one-of": [
+				"Rookie",
+				"Casual",
+				"Grinder",
+				"Prodigy",
+				"Demon Slayer",
+				"Custom"
+			]
+		},
+		"cycle-hud": {
+			"type": "bool",
+			"name": "Show cycle progress",
+			"description": "A readout in the top left while Cycle plays: the preset, its stage and skill, the attempt, its best, and the start position runs it has practiced to the end.",
+			"default": true
+		},
+		"cycle-custom-title": {
+			"type": "title",
+			"name": "Custom cycle (used when the preset is Custom)"
+		},
+		"cycle-attempts": {
+			"type": "int",
+			"name": "Milestone: attempts",
+			"description": "With the next setting: after this many attempts from 0%, a beginner's best is that far. The learning speed is worked out from it.",
+			"default": 32,
+			"min": 1,
+			"max": 5000,
+			"control": {
+				"slider": false,
+				"input": true,
+				"arrows": true,
+				"big-arrows": true,
+				"arrow-step": 1,
+				"big-arrow-step": 10
+			}
+		},
+		"cycle-progress": {
+			"type": "int",
+			"name": "Milestone: progress (%)",
+			"description": "How far a beginner's best is after the attempts above. Example: 15% after 32 attempts.",
+			"default": 15,
+			"min": 1,
+			"max": 100,
+			"control": {
+				"slider": true,
+				"input": true,
+				"arrows": true,
+				"big-arrows": false
+			}
+		},
+		"cycle-noob-fail": {
+			"type": "float",
+			"name": "Beginner mistake chance (% per 1%)",
+			"description": "The chance to die in each 1% of the level it has never played. Higher = a clumsier beginner.",
+			"default": 60.0,
+			"min": 2.0,
+			"max": 98.0,
+			"control": {
+				"slider": true,
+				"input": true,
+				"arrows": false,
+				"big-arrows": false
+			}
+		},
+		"cycle-choke": {
+			"type": "float",
+			"name": "Mastered mistake chance (% per 1%)",
+			"description": "The chance to die in each 1% it has fully mastered: its error margin once it knows the level. 0.6 means about a 55% chance to get through a whole mastered level; 0 never chokes.",
+			"default": 0.6,
+			"min": 0.0,
+			"max": 5.0,
+			"control": {
+				"slider": true,
+				"slider-step": 0.05,
+				"input": true,
+				"arrows": false,
+				"big-arrows": false
+			}
+		},
+		"cycle-curve": {
+			"type": "float",
+			"name": "Progress curve",
+			"description": "The shape of getting better at a part. 1: every time through helps the same. Higher: it stays bad for longer, then improves quickly. Lower: quick first gains, slow polishing.",
+			"default": 1.8,
+			"min": 0.3,
+			"max": 6.0,
+			"control": {
+				"slider": true,
+				"slider-step": 0.1,
+				"input": true,
+				"arrows": false,
+				"big-arrows": false
+			}
+		},
+		"cycle-practice-boost": {
+			"type": "float",
+			"name": "Start position practice speed",
+			"description": "How many times faster a part is learned in a run from a start position than in a run from 0%.",
+			"default": 2.0,
+			"min": 1.0,
+			"max": 20.0,
+			"control": {
+				"slider": true,
+				"slider-step": 0.5,
+				"input": true,
+				"arrows": false,
+				"big-arrows": false
+			}
+		},
+		"cycle-retention": {
+			"type": "int",
+			"name": "Practice run retention (%)",
+			"description": "When a run from a start position reaches the end, every part of it is known at least this well afterwards. 100 = a practiced run is mastered at once.",
+			"default": 65,
+			"min": 0,
+			"max": 100,
+			"control": {
+				"slider": true,
+				"input": true,
+				"arrows": true,
+				"big-arrows": false
+			}
+		},
+		"autoplay-title": {
+			"type": "title",
+			"name": "Autoplay"
 		},
 		"global-brain": {
 			"type": "bool",
