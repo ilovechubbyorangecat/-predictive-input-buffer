@@ -17,6 +17,7 @@
 #include <Geode/modify/GameObject.hpp>
 #include <Geode/modify/HardStreak.hpp>
 #include <Geode/modify/LevelEditorLayer.hpp>
+#include <Geode/modify/LevelInfoLayer.hpp>
 #include <Geode/modify/MenuLayer.hpp>
 #include <Geode/ui/TextInput.hpp>
 #include <Geode/modify/PlayLayer.hpp>
@@ -51,7 +52,7 @@
 #include <random>
 #include <unordered_map>
 #include <unordered_set>
-#include "cycle.hpp"
+#include "forecast.hpp"
 #include <vector>
 
 using namespace geode::prelude;
@@ -4062,49 +4063,47 @@ namespace online {
         say("Click Between Frames: switched off while the macro plays{} (back when autoplay stops)", bypass ? ", and its Physics Bypass" : "");
     }
 
-    // ===== the Cycle system: autoplay learns the level like a player (the model is in cycle.hpp) =====
-    // While it is on, autoplay makes mistakes on purpose. Each attempt it decides where it will
-    // die from how well it knows each 1% of the level, plays normally up to there, then misses a
-    // click (or clicks wrong) and crashes. What it got through is practised, so over the attempts
-    // it gets further and more consistent. Skill is kept per 1% of the level and per level, so a
-    // part practised from a start position is known when a run from 0% reaches it.
-    // Autoplay's own learning (the route, a macro's fixes) never sees a death made on purpose.
+    // ===== Attempt Progression & Forecasting (the model is in forecast.hpp) =====
+    // You set at which attempt the level is beaten. Every attempt before it has a percentage it
+    // ends at (worked out from its number, see forecast.hpp); autoplay plays normally up to there
+    // and then dies: by a mistake (a missed click or a misclick, "Natural") or right at the
+    // percentage ("Exact"). The HUD shows this attempt's percentage and the next one's.
+    // One memory per level: the target, the attempts done, the locked checkpoints, and the runs
+    // from start positions. Autoplay's own learning never sees a death made on purpose.
     void autoplayButton(PlayLayer* layer, bool down);
+    void hudRefresh(PlayLayer* layer);
 
-    constexpr char const* CYCLE_CUSTOM = "Custom";
-
-    struct CycleState {
+    struct ProgState {
         bool enabled = false;
         bool hud = true;
-        std::string preset = "Casual";
-        cycle::Params params;
-        cycle::Params solvedFor;
-        bool solved = false;
-        float rate = 0.2f;
-        cycle::Memory memory;
+        bool exact = false;
+        forecast::Memory memory;
         std::string key;          // the level the memory is of ("" = none loaded)
         // this attempt
         bool running = false;     // the attempt is followed (and counts when it ends)
-        bool needStart = false;   // its first tick hasn't been seen yet
+        bool needStart = false;   // its first step hasn't been seen yet
         float start = 0.f;        // where it started (%)
         float percent = 0.f;      // where it is now (%)
-        float deathAt = 1000.f;   // where it will make its mistake (%), 100+ = nowhere
+        float perTick = 0.f;      // how fast the percentage goes up (% a physics step)
+        float deathAt = 1000.f;   // where it ends (%), 100+ = it beats the level
+        int64_t number = 0;       // this attempt's number
+        float nextPreview = -1.f; // the next attempt's percentage (-1: unknown)
         bool failing = false;     // the mistake is being made: the bot's inputs are off
+        bool killDue = false;     // Exact: the player dies at the start of the next step
         bool misclick = false;
         int failTick = 0;
         int nextPress = 0;
         CCLabelBMFont* label = nullptr;
-        cycle::Rng rng { static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()) | 1ull };
     };
-    CycleState cyc;
+    ProgState prog;
+    Ref<GJGameLevel> lastViewedLevel;  // the level whose page was opened last (for the window, outside a level)
 
-    std::filesystem::path cycleDir() {
-        return Mod::get()->getSaveDir() / "cycle";
+    std::filesystem::path progDir() {
+        return Mod::get()->getSaveDir() / "progression";
     }
 
     // one memory per level, whatever start position is played
-    std::string cycleLevelKey(PlayLayer* layer) {
-        auto* level = layer ? layer->m_level : nullptr;
+    std::string progLevelKey(GJGameLevel* level) {
         if (!level) {
             return "";
         }
@@ -4121,229 +4120,278 @@ namespace online {
         return "local_" + name;
     }
 
-    void cycleReadSettings() {
+    void progReadSettings() {
         auto* mod = Mod::get();
-        cyc.enabled = mod->getSettingValue<bool>("cycle-enabled");
-        cyc.hud = mod->getSettingValue<bool>("cycle-hud");
-        cyc.preset = mod->getSettingValue<std::string>("cycle-preset");
-        cycle::Params p;
-        bool found = false;
-        for (auto const& preset : cycle::PRESETS) {
-            if (cyc.preset == preset.name) {
-                p = preset.params;
-                found = true;
-            }
-        }
-        if (!found) {
-            // Custom: every number is yours
-            cyc.preset = CYCLE_CUSTOM;
-            p.attempts = static_cast<int>(mod->getSettingValue<int64_t>("cycle-attempts"));
-            p.progress = static_cast<float>(mod->getSettingValue<int64_t>("cycle-progress"));
-            p.noobFail = static_cast<float>(mod->getSettingValue<double>("cycle-noob-fail")) / 100.f;
-            p.choke = static_cast<float>(mod->getSettingValue<double>("cycle-choke")) / 100.f;
-            p.curve = static_cast<float>(mod->getSettingValue<double>("cycle-curve"));
-            p.practiceBoost = static_cast<float>(mod->getSettingValue<double>("cycle-practice-boost"));
-            p.retention = static_cast<float>(mod->getSettingValue<int64_t>("cycle-retention")) / 100.f;
-        }
-        cyc.params = cycle::clamped(p);
-        if (!cyc.solved || !(cyc.solvedFor == cyc.params)) {
-            cyc.rate = cycle::solveRate(cyc.params);
-            cyc.solvedFor = cyc.params;
-            cyc.solved = true;
-            if (cyc.enabled) {
-                say("cycle: {} ({}% after {} attempts): learns {:.1f}% of a part each time through it", cyc.preset, cyc.params.progress,
-                    cyc.params.attempts, cyc.rate * 100.f);
-            }
-        }
+        prog.enabled = mod->getSettingValue<bool>("progression-enabled");
+        prog.hud = mod->getSettingValue<bool>("progression-hud");
+        prog.exact = mod->getSettingValue<std::string>("progression-death") == "Exact";
     }
 
-    void cycleLoad(PlayLayer* layer) {
-        auto key = cycleLevelKey(layer);
-        if (key == cyc.key) {
+    // a level seen for the first time: the default target, and the attempts the game has saved for it
+    forecast::Memory progFresh(GJGameLevel* level) {
+        forecast::Memory m;
+        m.target = Mod::get()->getSettingValue<int64_t>("progression-default-target");
+        m.attempts = level ? std::max(0, level->m_attempts.value()) : 0;
+        m.seed = (static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()) << 1) | 1ull;
+        forecast::normalize(m);
+        return m;
+    }
+
+    void progLoad(GJGameLevel* level) {
+        auto key = progLevelKey(level);
+        if (key == prog.key) {
             return;
         }
-        cyc.key = key;
-        cyc.memory = {};
+        prog.key = key;
+        prog.memory = progFresh(level);
         if (key.empty()) {
             return;
         }
-        std::ifstream in(cycleDir() / (key + ".txt"));
+        std::ifstream in(progDir() / (key + ".txt"));
         if (in) {
             std::stringstream text;
             text << in.rdbuf();
-            if (!cycle::deserialize(text.str(), cyc.memory)) {
-                cyc.memory = {};
-                say("cycle: this level's saved memory couldn't be read, it starts as a beginner");
+            forecast::Memory saved;
+            if (forecast::deserialize(text.str(), saved)) {
+                prog.memory = saved;
+            }
+            else {
+                say("progression: this level's saved data couldn't be read, it starts again");
             }
         }
     }
 
-    void cycleSave() {
-        if (cyc.key.empty()) {
+    void progSave() {
+        if (prog.key.empty()) {
             return;
         }
         std::error_code ec;
-        std::filesystem::create_directories(cycleDir(), ec);
-        std::ofstream out(cycleDir() / (cyc.key + ".txt"), std::ios::trunc);
+        std::filesystem::create_directories(progDir(), ec);
+        std::ofstream out(progDir() / (prog.key + ".txt"), std::ios::trunc);
         if (out) {
-            out << cycle::serialize(cyc.memory);
+            out << forecast::serialize(prog.memory);
         }
     }
 
-    // what the HUD and the window show
-    std::string cycleSummary(bool withRun) {
-        auto const& m = cyc.memory;
-        float avg = m.average();
-        auto text = fmt::format("Cycle: {} - {} (skill {:.0f}%)\nAttempt {}  -  Best {:.0f}%", cyc.preset, cycle::stageName(avg), avg * 100.f,
-            m.attempts + (cyc.running ? 1 : 0), m.best);
-        if (m.completions > 0) {
-            text += fmt::format("  -  Beaten x{}", m.completions);
-        }
-        if (withRun && cyc.running && !cyc.needStart && cyc.start >= 0.5f) {
-            text += fmt::format("  -  This run from {:.0f}%", cyc.start);
-        }
-        if (!m.runs.empty()) {
-            text += "\nPracticed: " + cycle::runsText(m);
-        }
-        return text;
+    std::string progPercent(float p) {
+        return p >= 100.f ? std::string("100%") : forecast::percentText(p) + "%";
     }
 
-    void cycleHudUpdate(PlayLayer* layer) {
-        bool show = cyc.enabled && cyc.hud && autoplay.active && layer && autoplay.layer == layer && !layer->m_isPracticeMode;
-        if (!show) {
-            if (cyc.label) {
-                cyc.label->setVisible(false);
+    // "Attempt 34 / 500 (466 left)" for runs from `start`
+    std::string progCountText(float start) {
+        auto const& m = prog.memory;
+        int64_t next = forecast::nextAttempt(m, start);
+        int64_t target = forecast::targetFor(m, start);
+        std::string where = forecast::fromStart(start) ? "" : fmt::format(" from {:.0f}%", start);
+        if (forecast::beatenFrom(m, start)) {
+            return fmt::format("Attempt {}{} (beaten at {})", next, where, target);
+        }
+        return fmt::format("Attempt {} / {}{} ({} left)", next, target, where, std::max<int64_t>(0, target - next));
+    }
+
+    // the HUD in the level
+    std::string progHudText() {
+        if (prog.running && !prog.needStart) {
+            auto text = fmt::format("{}\nThis attempt: {}", progCountText(prog.start), progPercent(prog.deathAt));
+            if (prog.nextPreview >= 0.f) {
+                text += fmt::format("\nNext Attempt Preview: {}", progPercent(prog.nextPreview));
             }
-            return;
+            return text;
         }
-        if (!cyc.label) {
-            cyc.label = CCLabelBMFont::create("", "chatFont.fnt");
-            cyc.label->setScale(0.5f);
-            cyc.label->setOpacity(190);
-            cyc.label->setAnchorPoint({ 0.f, 1.f });
-            cyc.label->setAlignment(kCCTextAlignmentLeft);
-            cyc.label->setPosition({ 6.f, CCDirector::get()->getWinSize().height - 6.f });
-            cyc.label->setID("cycle-label"_spr);
-            layer->addChild(cyc.label, 1000);
+        float start = prog.start;
+        return fmt::format("{}\nNext Attempt Preview: {}", progCountText(start),
+            progPercent(forecast::outcome(prog.memory, start, forecast::nextAttempt(prog.memory, start))));
+    }
+
+    // "#34 12%  #35 17%  ..." the next `count` attempts from `start`, as things are now
+    std::string progUpcoming(float start, int count) {
+        std::string out;
+        int64_t next = forecast::nextAttempt(prog.memory, start);
+        for (int i = 0; i < count; ++i) {
+            out += fmt::format("{}#{} {}", i ? "   " : "", next + i, progPercent(forecast::outcome(prog.memory, start, next + i)));
         }
-        cyc.label->setVisible(true);
-        cyc.label->setString(cycleSummary(true).c_str());
+        return out;
     }
 
     // the level went away with its label: only forgotten
-    void cycleForgetLayer() {
-        cyc.label = nullptr;
-        cyc.running = false;
-        cyc.failing = false;
+    void progForgetLayer() {
+        prog.label = nullptr;
+        prog.running = false;
+        prog.failing = false;
+        prog.killDue = false;
     }
 
-    void cycleRemoveLabel() {
-        if (cyc.label) {
-            cyc.label->removeFromParent();
-            cyc.label = nullptr;
+    void progRemoveLabel() {
+        if (prog.label) {
+            prog.label->removeFromParent();
+            prog.label = nullptr;
         }
+    }
+
+    void progStopAttempt() {
+        prog.running = false;
+        prog.failing = false;
+        prog.killDue = false;
     }
 
     // a new attempt (or autoplay was switched on: `midAttempt`, which isn't a whole attempt)
-    void cycleAttemptStart(PlayLayer* layer, bool midAttempt) {
-        cycleReadSettings();
-        cyc.failing = false;
-        cyc.running = false;
-        cyc.needStart = false;
-        cyc.deathAt = 1000.f;
-        if (cyc.enabled) {
-            cycleLoad(layer);
-            cyc.running = !midAttempt && !layer->m_isPracticeMode && !cyc.key.empty();
-            cyc.needStart = cyc.running;
+    void progAttemptStart(PlayLayer* layer, bool midAttempt) {
+        progReadSettings();
+        progStopAttempt();
+        prog.needStart = false;
+        prog.deathAt = 1000.f;
+        prog.nextPreview = -1.f;
+        prog.perTick = 0.f;
+        if (prog.enabled) {
+            progLoad(layer->m_level);
+            prog.running = !midAttempt && !layer->m_isPracticeMode && !prog.key.empty();
+            prog.needStart = prog.running;
         }
-        cycleHudUpdate(layer);
+        hudRefresh(layer);
     }
 
     // once a physics step while autoplay plays; true: the mistake is being made, autoplay's own
     // inputs stay off
-    bool cycleTick(PlayLayer* layer, PlayerObject* p1) {
-        if (!cyc.running) {
+    bool progTick(PlayLayer* layer) {
+        if (!prog.running) {
             return false;
         }
-        cyc.percent = std::clamp(layer->getCurrentPercent(), 0.f, 100.f);
-        if (cyc.needStart) {
-            cyc.needStart = false;
-            cyc.start = cyc.percent;
-            if (cyc.start < 0.5f) {
-                cyc.start = 0.f;
-            }
-            cyc.deathAt = cycle::planDeath(cyc.params, cyc.memory, cyc.start, cyc.rng);
-            cycleHudUpdate(layer);
-            say("cycle: attempt {} from {:.0f}% ({}, skill {:.0f}%): {}", cyc.memory.attempts + 1, cyc.start, cycle::stageName(cyc.memory.average()),
-                cyc.memory.average() * 100.f,
-                cyc.deathAt >= 100.f ? std::string("no mistake planned") : fmt::format("a mistake at {:.1f}%", cyc.deathAt));
+        float now = std::clamp(layer->getCurrentPercent(), 0.f, 100.f);
+        if (prog.needStart) {
+            prog.needStart = false;
+            prog.percent = now;
+            prog.start = now < 0.5f ? 0.f : now;
+            prog.number = forecast::nextAttempt(prog.memory, prog.start);
+            prog.deathAt = forecast::outcome(prog.memory, prog.start, prog.number);
+            // the next attempt's, as it will be once this one has ended where it is meant to
+            auto after = prog.memory;
+            forecast::record(after, prog.start, prog.deathAt, prog.deathAt >= 100.f);
+            prog.nextPreview = forecast::outcome(after, prog.start, forecast::nextAttempt(after, prog.start));
+            hudRefresh(layer);
+            say("progression: attempt {} of {} from {:.0f}%: {} (next attempt preview: {})", prog.number,
+                forecast::targetFor(prog.memory, prog.start), prog.start,
+                prog.deathAt >= 100.f ? std::string("it beats the level") : "it ends at " + progPercent(prog.deathAt), progPercent(prog.nextPreview));
         }
-        if (!cyc.failing) {
-            if (cyc.percent < cyc.deathAt) {
+        if (now > prog.percent) {
+            float step = now - prog.percent;
+            prog.perTick = prog.perTick > 0.f ? prog.perTick * 0.9f + step * 0.1f : step;
+        }
+        prog.percent = now;
+        if (prog.deathAt >= 100.f) {
+            return false;
+        }
+        if (prog.exact) {
+            // Exact: no mistake, the player dies right at the percentage (at the start of the next step)
+            if (now >= prog.deathAt && !prog.killDue) {
+                prog.killDue = true;
+                prog.failing = true;  // from here nothing of the attempt is autoplay's
+                autoplay.userTouched = true;
+            }
+            return prog.failing;
+        }
+        if (!prog.failing) {
+            // Natural: the mistake starts a quarter of a second before, so the crash lands about there
+            if (now + prog.perTick * static_cast<float>(st(60)) < prog.deathAt) {
                 return false;
             }
-            // the mistake starts: from here autoplay's inputs are off, and nothing of this attempt
-            // is learned by the route or sent to the global brain
-            cyc.failing = true;
-            cyc.failTick = tickCount;
-            cyc.misclick = cyc.rng.unit() < 0.4f;
-            cyc.nextPress = tickCount + (cyc.misclick ? 0 : st(170));
+            // from here autoplay's inputs are off, and nothing of this attempt is learned by the
+            // route or sent to the global brain
+            prog.failing = true;
+            prog.failTick = tickCount;
+            prog.misclick = (forecast::unit(prog.memory.seed, prog.start, prog.number, 7) < 0.4f);
+            prog.nextPress = tickCount + (prog.misclick ? 0 : st(170));
             autoplay.userTouched = true;
             autoplay.plan.clear();
         }
         // a missed click: the button stays as it was for 0.7 s. A misclick: it changes at once. If
         // that didn't crash it, it keeps pressing at random (a player who lost the rhythm).
-        if (tickCount >= cyc.nextPress) {
+        if (tickCount >= prog.nextPress) {
             autoplayButton(layer, !buf.appliedInput);
-            bool first = cyc.misclick && tickCount == cyc.failTick;
-            cyc.nextPress = tickCount + (first ? st(170) : st(30) + static_cast<int>(cyc.rng.unit() * st(90)));
+            bool first = prog.misclick && tickCount == prog.failTick;
+            float u = forecast::unit(prog.memory.seed, prog.start, prog.number, 100 + tickCount - prog.failTick);
+            prog.nextPress = tickCount + (first ? st(170) : st(30) + static_cast<int>(u * static_cast<float>(st(90))));
         }
         return true;
     }
 
-    // the attempt ended: a death (`finished` false) or the end of the level
-    void cycleAttemptEnd(PlayLayer* layer, bool finished) {
-        if (!cyc.running) {
+    // Exact: at the start of a game step, outside the players' own update
+    void progKillIfDue(PlayLayer* layer) {
+        if (!prog.killDue || !prog.running) {
             return;
         }
-        cyc.running = false;
-        bool onPurpose = cyc.failing;
-        cyc.failing = false;
-        if (cyc.needStart) {
+        prog.killDue = false;
+        if (layer->m_player1 && !layer->m_player1->m_isDead) {
+            layer->destroyPlayer(layer->m_player1, nullptr);
+        }
+    }
+
+    // the attempt ended: a death (`finished` false) or the end of the level
+    void progAttemptEnd(PlayLayer* layer, bool finished) {
+        if (!prog.running) {
+            return;
+        }
+        bool onPurpose = prog.failing;
+        progStopAttempt();
+        if (prog.needStart) {
             return;  // it ended before its first step: nothing to count
         }
-        float before = cyc.memory.average();
-        cycle::learn(cyc.params, cyc.memory, cyc.rate, cyc.start, cyc.percent, finished);
-        cycleSave();
-        say("cycle: attempt {} {:.0f}%-{:.0f}% {} - skill {:.1f}% -> {:.1f}% ({}), best {:.0f}%", cyc.memory.attempts, cyc.start,
-            finished ? 100.f : cyc.percent, finished ? "reached the end" : onPurpose ? "died (its mistake)" : "died (autoplay's own death)",
-            before * 100.f, cyc.memory.average() * 100.f, cycle::stageName(cyc.memory.average()), cyc.memory.best);
-        cycleHudUpdate(layer);
+        float end = finished ? 100.f : prog.percent;
+        forecast::record(prog.memory, prog.start, end, finished);
+        progSave();
+        say("progression: attempt {} from {:.0f}% ended at {} ({}; forecast {}) - {}", prog.number, prog.start, progPercent(end),
+            finished ? "beat the level" : onPurpose ? "as forecast" : "autoplay's own death", progPercent(prog.deathAt), progCountText(prog.start));
+        hudRefresh(layer);
     }
 
-    // Reset: forget this level (in a level) or every level (from the menus)
-    int cycleReset(PlayLayer* layer) {
+    // ----- edits (the Progression window) -----
+
+    void progSetTarget(int64_t target) {
+        prog.memory.target = target;
+        forecast::normalize(prog.memory);
+        progSave();
+    }
+
+    // the next attempt from 0% gets this number
+    void progJumpTo(int64_t number) {
+        prog.memory.attempts = std::max<int64_t>(0, number - 1);
+        progSave();
+    }
+
+    void progSetCheckpoints(std::string const& text) {
+        prog.memory.checkpoints = forecast::parseCheckpoints(text);
+        forecast::normalize(prog.memory);
+        progSave();
+    }
+
+    // Level data: the total attempts the game has saved for the level. The progression counts on
+    // from the same number.
+    void setLevelAttempts(GJGameLevel* level, int attempts) {
+        if (!level) {
+            return;
+        }
+        attempts = std::max(0, attempts);
+        int before = level->m_attempts.value();
+        level->m_attempts = attempts;
+        progLoad(level);
+        prog.memory.attempts = attempts;
+        progSave();
+        say("level data: {} total attempts {} -> {} ({} left to the target of {})", std::string(level->m_levelName), before, attempts,
+            forecast::remaining(prog.memory, 0.f), prog.memory.target);
+    }
+
+    // forget this level's progression: the target, the checkpoints, the attempts and the practiced runs
+    void progReset(GJGameLevel* level) {
         std::error_code ec;
-        int removed = 0;
-        if (layer) {
-            cycleLoad(layer);
-            if (!cyc.key.empty() && std::filesystem::remove(cycleDir() / (cyc.key + ".txt"), ec)) {
-                ++removed;
-            }
+        progLoad(level);
+        if (!prog.key.empty()) {
+            std::filesystem::remove(progDir() / (prog.key + ".txt"), ec);
         }
-        else {
-            removed = static_cast<int>(std::filesystem::remove_all(cycleDir(), ec));
-            cyc.key.clear();
-        }
-        cyc.memory = {};
-        cyc.running = false;  // the attempt in progress doesn't count either
-        cyc.failing = false;
-        say("cycle: {} forgotten, it is a complete beginner again", layer ? "this level is" : "every level is");
-        cycleHudUpdate(layer);
-        return removed;
+        prog.memory = progFresh(level);
+        progStopAttempt();  // the attempt in progress doesn't count either
+        say("progression: this level starts again (target {}, attempt {})", prog.memory.target, prog.memory.attempts + 1);
     }
 
-    // ===== Safe Mode and the AUTOPLAY text (work with or without Cycle) =====
+    // ===== Safe Mode, the AUTOPLAY text and Hide Capture (work with or without the progression) =====
     // Safe Mode on: the level is in the game's test mode while autoplay is on, so the game saves no
     // completion, progress or stats. Off: the level keeps the mode it was opened in.
     PlayLayer* safeLayer = nullptr;   // the level whose own test mode flag is remembered
@@ -4360,10 +4408,166 @@ namespace online {
         layer->m_isTestMode = Mod::get()->getSettingValue<bool>("safe-mode") ? true : safeOriginal;
     }
 
-    void applyAutoplayText() {
-        if (autoplay.tag) {
-            autoplay.tag->setVisible(!Mod::get()->getSettingValue<bool>("hide-autoplay-text"));
+    // Hide Capture: the mod's texts in the level (AUTOPLAY, the forecast) are taken out of the game's
+    // picture, so no recording of the game has them. On Windows they are drawn instead in a small
+    // see-through window on top of the game that screen capture leaves out (Windows 10 2004 or
+    // newer), so you still see them. Elsewhere they are only hidden.
+#ifdef GEODE_IS_WINDOWS
+    namespace capture {
+        HWND overlay = nullptr;
+        HWND game = nullptr;
+        HFONT font = nullptr;
+        std::wstring text;
+        bool wanted = false;
+
+        // over the game's picture while the game is the window in front; hidden otherwise
+        void place() {
+            if (!overlay) {
+                return;
+            }
+            if (!game || !IsWindow(game)) {
+                HWND active = GetActiveWindow();
+                game = active != overlay ? active : nullptr;
+            }
+            bool show = wanted && !text.empty() && game && !IsIconic(game) && GetForegroundWindow() == game;
+            if (!show) {
+                ShowWindow(overlay, SW_HIDE);
+                return;
+            }
+            RECT client {};
+            GetClientRect(game, &client);
+            POINT corner { 0, 0 };
+            ClientToScreen(game, &corner);
+            SetWindowPos(overlay, HWND_TOPMOST, corner.x, corner.y, client.right, client.bottom, SWP_NOACTIVATE | SWP_SHOWWINDOW);
         }
+
+        LRESULT CALLBACK proc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+            switch (message) {
+                case WM_PAINT: {
+                    PAINTSTRUCT ps;
+                    HDC dc = BeginPaint(window, &ps);
+                    RECT area {};
+                    GetClientRect(window, &area);
+                    // black is the see-through colour of the window
+                    FillRect(dc, &area, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+                    SetBkMode(dc, TRANSPARENT);
+                    HGDIOBJ old = font ? SelectObject(dc, font) : nullptr;
+                    RECT shadow { area.left + 13, area.top + 11, area.right, area.bottom };
+                    SetTextColor(dc, RGB(8, 8, 8));
+                    DrawTextW(dc, text.c_str(), -1, &shadow, DT_LEFT | DT_TOP | DT_NOPREFIX);
+                    RECT front { area.left + 12, area.top + 10, area.right, area.bottom };
+                    SetTextColor(dc, RGB(255, 220, 110));
+                    DrawTextW(dc, text.c_str(), -1, &front, DT_LEFT | DT_TOP | DT_NOPREFIX);
+                    if (old) {
+                        SelectObject(dc, old);
+                    }
+                    EndPaint(window, &ps);
+                    return 0;
+                }
+                case WM_TIMER:
+                    place();
+                    return 0;
+                case WM_NCHITTEST:
+                    return HTTRANSPARENT;  // clicks go to the game
+                default:
+                    return DefWindowProcW(window, message, wParam, lParam);
+            }
+        }
+
+        void ensure() {
+            if (overlay) {
+                return;
+            }
+            HINSTANCE instance = GetModuleHandleW(nullptr);
+            WNDCLASSW cls {};
+            cls.lpfnWndProc = proc;
+            cls.hInstance = instance;
+            cls.lpszClassName = L"CatAutoplayCaptureOverlay";
+            RegisterClassW(&cls);
+            game = GetActiveWindow();
+            overlay = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, cls.lpszClassName, L"",
+                WS_POPUP, 0, 0, 16, 16, nullptr, nullptr, instance, nullptr);
+            if (!overlay) {
+                return;
+            }
+            SetLayeredWindowAttributes(overlay, RGB(0, 0, 0), 0, LWA_COLORKEY);
+            // 0x11 = WDA_EXCLUDEFROMCAPTURE: screen and window capture leave this window out
+            if (!SetWindowDisplayAffinity(overlay, 0x11)) {
+                geode::log::warn("Hide Capture: this Windows can't leave a window out of capture (needs Windows 10 2004 or newer)");
+            }
+            font = CreateFontW(22, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                NONANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+            SetTimer(overlay, 1, 200, nullptr);
+        }
+
+        void set(bool on, std::string const& utf8) {
+            if (!on && !overlay) {
+                return;
+            }
+            ensure();
+            if (!overlay) {
+                return;
+            }
+            std::wstring wide;
+            if (on && !utf8.empty()) {
+                int n = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.size()), nullptr, 0);
+                wide.resize(static_cast<size_t>(std::max(0, n)));
+                if (n > 0) {
+                    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.size()), wide.data(), n);
+                }
+            }
+            bool changed = wide != text || on != wanted;
+            text = wide;
+            wanted = on;
+            place();
+            if (changed) {
+                InvalidateRect(overlay, nullptr, TRUE);
+            }
+        }
+    }
+#endif
+
+    // every text the mod shows in the level, put where the settings say: in the game's picture,
+    // in the capture-free window (Hide Capture), or nowhere
+    void hudRefresh(PlayLayer* layer) {
+        auto* mod = Mod::get();
+        bool hideCapture = mod->getSettingValue<bool>("hide-capture");
+        bool playing = autoplay.active && layer && autoplay.layer == layer;
+        bool showTag = playing && autoplay.tag && !mod->getSettingValue<bool>("hide-autoplay-text");
+        bool showProg = playing && prog.enabled && prog.hud && !layer->m_isPracticeMode && !prog.key.empty();
+        if (playing && autoplay.tag) {
+            autoplay.tag->setVisible(showTag && !hideCapture);
+        }
+        std::string progText = showProg ? progHudText() : std::string();
+        if (showProg && !hideCapture) {
+            if (!prog.label) {
+                prog.label = CCLabelBMFont::create("", "chatFont.fnt");
+                prog.label->setScale(0.5f);
+                prog.label->setOpacity(190);
+                prog.label->setAnchorPoint({ 0.f, 1.f });
+                prog.label->setAlignment(kCCTextAlignmentLeft);
+                prog.label->setPosition({ 6.f, CCDirector::get()->getWinSize().height - 6.f });
+                prog.label->setID("progression-label"_spr);
+                layer->addChild(prog.label, 1000);
+            }
+            prog.label->setVisible(true);
+            prog.label->setString(progText.c_str());
+        }
+        else if (prog.label) {
+            prog.label->setVisible(false);
+        }
+#ifdef GEODE_IS_WINDOWS
+        std::string outside;
+        if (hideCapture) {
+            if (showTag) {
+                outside = autoplay.takeOver ? "AUTOPLAY - TAKE OVER" : "AUTOPLAY";
+            }
+            if (showProg) {
+                outside += (outside.empty() ? "" : "\n") + progText;
+            }
+        }
+        capture::set(hideCapture && !outside.empty(), outside);
+#endif
     }
 
     void stopAutoplay(char const* why) {
@@ -4380,7 +4584,7 @@ namespace online {
             if (autoplay.tag) {
                 autoplay.tag->removeFromParent();
             }
-            cycleRemoveLabel();
+            progRemoveLabel();
             if (autoplay.trailNode) {
                 autoplay.trailNode->removeFromParent();
             }
@@ -4394,22 +4598,24 @@ namespace online {
             }
         }
         say("autoplay off{} ({} inputs)", why, autoplay.inputs);
-        cycleForgetLayer();
+        progForgetLayer();
         routeReset();
         buf.objIndex.clear();
         autoplay = {};
+        hudRefresh(nullptr);  // nothing of the mod's is on screen any more
         buf.autoDangers.clear();
         onlineMacroTried.clear();  // test 86: looked up again next start (after changing TPS, say)
     }
 
     // a level that was left without quitting: its label went with it, so it's only forgotten
     void forgetAutoplay() {
-        cycleForgetLayer();
+        progForgetLayer();
         safeLayer = nullptr;
         routeReset();
         dropSnaps(false);  // the level they belonged to is gone
         buf.objIndex.clear();
         autoplay = {};
+        hudRefresh(nullptr);
         buf.autoDangers.clear();
     }
 
@@ -4461,11 +4667,10 @@ namespace online {
         }
         autoplay.tag->setID("autoplay-label"_spr);
         layer->addChild(autoplay.tag, 1000);
-        applyAutoplayText();
         say("autoplay on: {}", Mod::get()->getSettingValue<bool>("safe-mode")
             ? "Safe Mode, the level is in test mode and nothing is saved as progress"
             : "Safe Mode is OFF, the game saves this level's progress and completions as if you played");
-        cycleAttemptStart(layer, true);
+        progAttemptStart(layer, true);
         autoplay.trailNode = CCDrawNode::create();
         autoplay.trailNode->setID("autoplay-trail"_spr);
         autoplay.trailNode->setVisible(Mod::get()->getSettingValue<bool>("autoplay-trail"));  // v3.0.1: hidden for showcases
@@ -4832,7 +5037,7 @@ namespace online {
         autoplay.diedThisAttempt = false;
         autoplay.reports = 0;
         clearQueue();
-        cycleAttemptStart(layer, false);
+        progAttemptStart(layer, false);
     }
 
     // a death: keep this attempt's inputs up to a bit before it (normal mode, bot-only attempts)
@@ -7157,7 +7362,7 @@ namespace online {
     // handlePlaying): every input up to this frame, then every position record up to it (x, y, angle)
     void macroStepXd(PlayLayer* layer) {
         if (!autoplay.active || autoplay.layer != layer || autoplay.macro.empty() || layer->m_isPracticeMode || buf.simulating ||
-            !macroUsable(layer) || layer->m_levelEndAnimationStarted || cyc.failing) {
+            !macroUsable(layer) || layer->m_levelEndAnimationStarted || prog.failing) {
             return;
         }
         int frame = macroNow(layer);
@@ -7229,7 +7434,7 @@ namespace online {
     }
 
     void macroStep(PlayLayer* layer) {
-        if (!autoplay.active || autoplay.layer != layer || autoplay.macro.empty() || layer->m_isPracticeMode || buf.simulating || cyc.failing) {
+        if (!autoplay.active || autoplay.layer != layer || autoplay.macro.empty() || layer->m_isPracticeMode || buf.simulating || prog.failing) {
             return;
         }
         if (autoplay.macroXd) {
@@ -7568,12 +7773,12 @@ namespace online {
             return;
         }
         measureProgress(layer);  // test 74: once a physics step
-        // Cycle: you playing with Take Over isn't the bot's attempt; its mistake keeps autoplay's inputs off
-        if (cyc.running && autoplay.takeOver && tickCount < autoplay.userUntil) {
-            cyc.running = false;
-            cyc.failing = false;
+        // the progression: you playing with Take Over isn't the bot's attempt; while its mistake is
+        // made autoplay's inputs stay off
+        if (prog.running && autoplay.takeOver && tickCount < autoplay.userUntil) {
+            progStopAttempt();
         }
-        if (cycleTick(layer, p1)) {
+        if (progTick(layer)) {
             return;
         }
         // v3.1.1: the run's position every 3 steps (for the global brain)
@@ -7933,13 +8138,196 @@ public:
 };
 
 // The window (Ctrl+Q): start / stop, Take Over, the macro buttons, and the mod's settings.
+// The Progression window: the level's target, the attempt it is at, the locked checkpoints and
+// the total attempts the game has saved for it; with what the next attempts will be.
+class ProgressionPopup : public geode::Popup {
+    static constexpr float PW = 380.f, PH = 286.f;
+    Ref<GJGameLevel> m_level;
+    geode::TextInput* m_target = nullptr;
+    geode::TextInput* m_jump = nullptr;
+    geode::TextInput* m_total = nullptr;
+    geode::TextInput* m_checkpoints = nullptr;
+    CCLabelBMFont* m_preview = nullptr;
+
+public:
+    static inline std::function<void()> s_changed;  // the main window shows the new numbers
+
+private:
+    // where runs start in the level being played (0 outside a level)
+    float startNow() {
+        auto* layer = GameManager::get()->m_playLayer;
+        return layer && layer->m_level == m_level.data() && autoplay.active ? prog.start : 0.f;
+    }
+
+    geode::TextInput* addRow(char const* name, float y, char const* filter, size_t most) {
+        auto* label = CCLabelBMFont::create(name, "bigFont.fnt");
+        label->setScale(0.34f);
+        label->setAnchorPoint({ 0.f, 0.5f });
+        label->setPosition({ 18.f, y });
+        m_mainLayer->addChild(label);
+        auto* input = geode::TextInput::create(120.f, "", "bigFont.fnt");
+        input->setFilter(filter);
+        input->setMaxCharCount(most);
+        input->setScale(0.7f);
+        input->setPosition({ PW - 64.f, y });
+        m_mainLayer->addChild(input);
+        return input;
+    }
+
+    void fill() {
+        progLoad(m_level);
+        auto const& m = prog.memory;
+        m_target->setString(std::to_string(m.target));
+        m_jump->setString(std::to_string(m.attempts + 1));
+        m_total->setString(std::to_string(m_level->m_attempts.value()));
+        m_checkpoints->setString(forecast::checkpointsText(m));
+        showPreview();
+    }
+
+    void showPreview() {
+        auto const& m = prog.memory;
+        float start = startNow();
+        auto text = fmt::format("{}\n{}", progCountText(0.f), progUpcoming(0.f, 6));
+        if (!forecast::fromStart(start)) {
+            text += fmt::format("\n{}\n{}", progCountText(start), progUpcoming(start, 6));
+        }
+        auto practiced = forecast::practicedText(m);
+        if (!practiced.empty()) {
+            text += "\nPracticed: " + practiced;
+        }
+        m_preview->setString(text.c_str());
+        m_preview->limitLabelWidth(PW - 30.f, 0.55f, 0.2f);
+    }
+
+    static int64_t number(std::string const& text, int64_t fallback) {
+        try {
+            return text.empty() ? fallback : std::stoll(text);
+        }
+        catch (...) {
+            return fallback;
+        }
+    }
+
+    void onApply(CCObject*) {
+        progLoad(m_level);
+        auto const& m = prog.memory;
+        int64_t target = number(m_target->getString(), m.target);
+        int64_t jump = number(m_jump->getString(), m.attempts + 1);
+        int64_t total = number(m_total->getString(), m_level->m_attempts.value());
+        if (target != m.target) {
+            int64_t before = m.target;
+            progSetTarget(target);
+            say("progression: the level is now beaten at attempt {} (was {}): {} left", prog.memory.target, before,
+                forecast::remaining(prog.memory, 0.f));
+        }
+        // the saved total first: the progression counts on from it; a number typed in "next attempt" wins
+        if (total != m_level->m_attempts.value()) {
+            setLevelAttempts(m_level, static_cast<int>(std::clamp<int64_t>(total, 0, 2000000000)));
+        }
+        else if (jump != prog.memory.attempts + 1) {
+            progJumpTo(jump);
+            say("progression: jumped to attempt {}: it will end at {}", prog.memory.attempts + 1,
+                progPercent(forecast::outcome(prog.memory, 0.f, prog.memory.attempts + 1)));
+        }
+        std::string cps = m_checkpoints->getString();
+        if (cps != forecast::checkpointsText(prog.memory)) {
+            progSetCheckpoints(cps);
+            say("progression: checkpoints locked: {}", prog.memory.checkpoints.empty() ? std::string("none") : forecast::checkpointsText(prog.memory));
+        }
+        // an attempt in progress keeps the percentage it started with; the next one uses the new numbers
+        fill();
+        hudRefresh(GameManager::get()->m_playLayer);
+        if (s_changed) {
+            s_changed();
+        }
+    }
+
+    void onReset(CCObject*) {
+        Ref<ProgressionPopup> self = this;
+        createQuickPopup("Reset Progression",
+            "Start this level's progression again? The target goes back to the default, and the checkpoints, the attempt it is at and the "
+            "practiced runs are wiped. (The total attempts the game has saved stay as they are.)",
+            "Cancel", "Reset", [self](FLAlertLayer*, bool reset) {
+                if (!reset) {
+                    return;
+                }
+                progReset(self->m_level);
+                self->fill();
+                hudRefresh(GameManager::get()->m_playLayer);
+                if (s_changed) {
+                    s_changed();
+                }
+            });
+    }
+
+protected:
+    bool init(GJGameLevel* level) {
+        if (!Popup::init(PW, PH, "GJ_square01.png")) {
+            return false;
+        }
+        m_level = level;
+        this->setTitle("Attempt Progression");
+        auto* name = CCLabelBMFont::create(std::string(level->m_levelName).c_str(), "goldFont.fnt");
+        name->setPosition({ PW / 2.f, PH - 40.f });
+        name->limitLabelWidth(PW - 40.f, 0.6f, 0.2f);
+        m_mainLayer->addChild(name);
+
+        m_target = addRow("Beat the level at attempt", PH - 64.f, "0123456789", 9);
+        m_jump = addRow("Next attempt number (jump)", PH - 90.f, "0123456789", 9);
+        m_total = addRow("Level total attempts (saved)", PH - 116.f, "0123456789", 9);
+        auto* label = CCLabelBMFont::create("Checkpoints: attempt:percent, ...  (200:60, 500:87, 762:97)", "bigFont.fnt");
+        label->setScale(0.28f);
+        label->setAnchorPoint({ 0.f, 0.5f });
+        label->setPosition({ 18.f, PH - 138.f });
+        m_mainLayer->addChild(label);
+        m_checkpoints = geode::TextInput::create(PW - 36.f, "none", "chatFont.fnt");
+        m_checkpoints->setFilter("0123456789:=,;.% ");
+        m_checkpoints->setMaxCharCount(400);
+        m_checkpoints->setPosition({ PW / 2.f, PH - 160.f });
+        m_mainLayer->addChild(m_checkpoints);
+
+        m_preview = CCLabelBMFont::create("", "chatFont.fnt");
+        m_preview->setScale(0.55f);
+        m_preview->setAlignment(kCCTextAlignmentCenter);
+        m_preview->setAnchorPoint({ 0.5f, 1.f });
+        m_preview->setPosition({ PW / 2.f, PH - 180.f });
+        m_mainLayer->addChild(m_preview);
+
+        auto* menu = CCMenu::create();
+        menu->setPosition({ 0.f, 0.f });
+        menu->setContentSize({ PW, PH });
+        m_mainLayer->addChild(menu);
+        auto* apply = CCMenuItemSpriteExtra::create(ButtonSprite::create("Apply", "goldFont.fnt", "GJ_button_01.png", 0.7f), this,
+            menu_selector(ProgressionPopup::onApply));
+        apply->setPosition({ PW / 2.f - 60.f, 24.f });
+        menu->addChild(apply);
+        auto* reset = CCMenuItemSpriteExtra::create(ButtonSprite::create("Reset", "goldFont.fnt", "GJ_button_06.png", 0.7f), this,
+            menu_selector(ProgressionPopup::onReset));
+        reset->setPosition({ PW / 2.f + 60.f, 24.f });
+        menu->addChild(reset);
+        fill();
+        return true;
+    }
+
+public:
+    static ProgressionPopup* create(GJGameLevel* level) {
+        auto* ret = new ProgressionPopup();
+        if (ret->init(level)) {
+            ret->autorelease();
+            return ret;
+        }
+        delete ret;
+        return nullptr;
+    }
+};
+
+// The window (Ctrl+Q): start / stop, the switches, the macro buttons, the progression and the mod's settings.
 class AutoplayMenu : public geode::Popup {
     static constexpr float W = 350.f, H = 292.f;
     static inline AutoplayMenu* s_open = nullptr;
     CCLabelBMFont* m_status = nullptr;
     ButtonSprite* m_startSprite = nullptr;
-    CCLabelBMFont* m_preset = nullptr;
-    CCLabelBMFont* m_cycle = nullptr;
+    CCLabelBMFont* m_progText = nullptr;
 
     void addButton(CCMenu* menu, char const* text, SEL_MenuHandler action, CCPoint pos, int tag = 0) {
         auto* sprite = ButtonSprite::create(text, "goldFont.fnt", "GJ_button_04.png", 0.6f);
@@ -7963,6 +8351,12 @@ class AutoplayMenu : public geode::Popup {
         m_mainLayer->addChild(name);
     }
 
+    // the level the progression is about: the one being played, or the one whose page was opened last
+    static GJGameLevel* levelNow() {
+        auto* layer = GameManager::get()->m_playLayer;
+        return layer && layer->m_level ? layer->m_level : lastViewedLevel.data();
+    }
+
     void refresh() {
         auto* layer = GameManager::get()->m_playLayer;
         if (m_status) {
@@ -7971,29 +8365,27 @@ class AutoplayMenu : public geode::Popup {
         if (m_startSprite) {
             m_startSprite->setString(autoplay.active ? "Stop Autoplay" : "Start Autoplay");
         }
-        cycleReadSettings();
-        if (layer) {
-            cycleLoad(layer);
-        }
-        if (m_preset) {
-            m_preset->setString(cyc.preset.c_str());
-        }
-        if (m_cycle) {
+        progReadSettings();
+        if (m_progText) {
             std::string text;
-            if (!cyc.enabled) {
-                text = "Cycle is off: autoplay plays as well as it can";
-            }
-            else if (!layer) {
-                text = fmt::format("Cycle: {} ({:.0f}% after {} attempts)\nOpen a level to see what it has learned there", cyc.preset,
-                    cyc.params.progress, cyc.params.attempts);
+            auto* level = levelNow();
+            if (!level) {
+                text = prog.enabled ? "Progression is on: open a level to see its forecast" : "Progression is off";
             }
             else {
-                text = cycleSummary(false) + fmt::format("\nChance to beat it from 0% now: {:.1f}%",
-                    cycle::finishChance(cyc.params, cyc.memory, 0.f) * 100.f);
+                progLoad(level);
+                float start = layer && autoplay.active ? prog.start : 0.f;
+                text = fmt::format("{}{}: {}\nNext: {}", prog.enabled ? "" : "(off) ", std::string(level->m_levelName), progCountText(start),
+                    progUpcoming(start, 4));
+                auto practiced = forecast::practicedText(prog.memory);
+                if (!practiced.empty()) {
+                    text += "\nPracticed: " + practiced;
+                }
             }
-            m_cycle->setString(text.c_str());
+            m_progText->setString(text.c_str());
+            m_progText->limitLabelWidth(W - 24.f, 0.55f, 0.2f);
         }
-        cycleHudUpdate(layer);
+        hudRefresh(layer);
     }
 
     // the checkboxes are mod settings (they are in the Geode settings too)
@@ -8003,12 +8395,12 @@ class AutoplayMenu : public geode::Popup {
         return on;
     }
 
-    void onCycle(CCObject*) {
-        bool on = flipSetting("cycle-enabled");
-        say("cycle {}", on ? "on: autoplay learns the level like a player (from the next attempt)" : "off");
+    void onProgressionToggle(CCObject*) {
+        bool on = flipSetting("progression-enabled");
+        say("progression {}", on ? "on: attempts end where the forecast says (from the next attempt)"
+                                 : "off: nothing is counted or forecast, autoplay plays as well as it can");
         if (!on) {
-            cyc.running = false;  // an attempt in progress plays on without a mistake
-            cyc.failing = false;
+            progStopAttempt();  // an attempt in progress plays on, uncounted
         }
         refresh();
     }
@@ -8023,43 +8415,39 @@ class AutoplayMenu : public geode::Popup {
 
     void onHideText(CCObject*) {
         flipSetting("hide-autoplay-text");
-        applyAutoplayText();
-    }
-
-    // the five presets, then Custom (its numbers are in Settings)
-    void onPreset(CCObject* sender) {
-        std::vector<std::string> names;
-        for (auto const& preset : cycle::PRESETS) {
-            names.push_back(preset.name);
-        }
-        names.push_back(CYCLE_CUSTOM);
-        int n = static_cast<int>(names.size());
-        int at = 0;
-        for (int i = 0; i < n; ++i) {
-            if (names[i] == cyc.preset) {
-                at = i;
-            }
-        }
-        at = (at + static_cast<CCNode*>(sender)->getTag() + n) % n;
-        Mod::get()->setSettingValue<std::string>("cycle-preset", names[at]);
         refresh();
     }
 
-    void onResetCycle(CCObject*) {
-        auto* layer = GameManager::get()->m_playLayer;
-        createQuickPopup("Reset Cycle",
-            layer ? "Forget everything the cycle learned on <cy>this level</c>? Its attempts, its best and the runs it practiced are wiped, and it "
-                    "plays like a complete beginner again."
-                  : "Forget everything the cycle learned on <cr>every level</c>? (Open a level first to reset only that one.)",
-            "Cancel", "Reset", [](FLAlertLayer*, bool reset) {
-                if (!reset) {
-                    return;
-                }
-                cycleReset(GameManager::get()->m_playLayer);
-                if (s_open) {
-                    s_open->refresh();
-                }
-            });
+    void onForecastHud(CCObject*) {
+        flipSetting("progression-hud");
+        refresh();
+    }
+
+    void onHideCapture(CCObject*) {
+        bool on = flipSetting("hide-capture");
+#ifdef GEODE_IS_WINDOWS
+        say("hide capture {}", on ? "on: the mod's texts in the level are out of the game's picture and shown in a window capture leaves out"
+                                  : "off");
+#else
+        say("hide capture {}", on ? "on: the mod's texts in the level are hidden (only Windows can show them outside the capture)" : "off");
+#endif
+        refresh();
+    }
+
+    void onProgression(CCObject*) {
+        auto* level = levelNow();
+        if (!level) {
+            FLAlertLayer::create("Attempt Progression", "Open a level (or its page) first: the progression is set per level.", "OK")->show();
+            return;
+        }
+        ProgressionPopup::s_changed = [] {
+            if (s_open) {
+                s_open->refresh();
+            }
+        };
+        if (auto* p = ProgressionPopup::create(level)) {
+            p->show();
+        }
     }
 
     void onSettings(CCObject*) {
@@ -8120,6 +8508,7 @@ class AutoplayMenu : public geode::Popup {
             autoplay.takeOver = on;
             if (autoplay.tag) {
                 autoplay.tag->setString(on ? "AUTOPLAY - TAKE OVER" : "AUTOPLAY");
+                hudRefresh(GameManager::get()->m_playLayer);
             }
         }
         say("autoplay take over {}", on ? "on" : "off");
@@ -8182,7 +8571,7 @@ protected:
         this->setTitle("Autoplay");
         s_open = this;
         readSettings();
-        cycleReadSettings();
+        progReadSettings();
         auto* mod = Mod::get();
 
         m_status = CCLabelBMFont::create("", "chatFont.fnt");
@@ -8202,38 +8591,28 @@ protected:
 
         // the switches, two a row
         float colA = 30.f, colB = W / 2.f + 12.f;
-        addToggle(menu, "Take Over", mod->getSavedValue<bool>("autoplay-takeover", false), menu_selector(AutoplayMenu::onTakeOver), { colA, H - 102.f });
-        addToggle(menu, "Cycle Mode", cyc.enabled, menu_selector(AutoplayMenu::onCycle), { colB, H - 102.f });
-        addToggle(menu, "Safe Mode", mod->getSettingValue<bool>("safe-mode"), menu_selector(AutoplayMenu::onSafeMode), { colA, H - 124.f });
+        addToggle(menu, "Take Over", mod->getSavedValue<bool>("autoplay-takeover", false), menu_selector(AutoplayMenu::onTakeOver), { colA, H - 100.f });
+        addToggle(menu, "Progression", prog.enabled, menu_selector(AutoplayMenu::onProgressionToggle), { colB, H - 100.f });
+        addToggle(menu, "Safe Mode", mod->getSettingValue<bool>("safe-mode"), menu_selector(AutoplayMenu::onSafeMode), { colA, H - 121.f });
+        addToggle(menu, "Forecast HUD", prog.hud, menu_selector(AutoplayMenu::onForecastHud), { colB, H - 121.f });
         addToggle(menu, "Hide Autoplay Text", mod->getSettingValue<bool>("hide-autoplay-text"), menu_selector(AutoplayMenu::onHideText),
-            { colB, H - 124.f });
+            { colA, H - 142.f });
+        addToggle(menu, "Hide Capture", mod->getSettingValue<bool>("hide-capture"), menu_selector(AutoplayMenu::onHideCapture), { colB, H - 142.f });
 
-        // the cycle: its preset and what it has learned on this level
-        auto* presetName = CCLabelBMFont::create("Cycle preset", "bigFont.fnt");
-        presetName->setScale(0.32f);
-        presetName->setAnchorPoint({ 0.f, 0.5f });
-        presetName->setPosition({ colA - 8.f, H - 148.f });
-        m_mainLayer->addChild(presetName);
-        addButton(menu, "<", menu_selector(AutoplayMenu::onPreset), { W / 2.f - 28.f, H - 148.f }, -1);
-        addButton(menu, ">", menu_selector(AutoplayMenu::onPreset), { W - 30.f, H - 148.f }, 1);
-        m_preset = CCLabelBMFont::create("", "goldFont.fnt");
-        m_preset->setScale(0.55f);
-        m_preset->setPosition({ (W / 2.f - 28.f + W - 30.f) / 2.f, H - 148.f });
-        m_mainLayer->addChild(m_preset);
-
-        m_cycle = CCLabelBMFont::create("", "chatFont.fnt");
-        m_cycle->setScale(0.55f);
-        m_cycle->setAlignment(kCCTextAlignmentCenter);
-        m_cycle->setAnchorPoint({ 0.5f, 1.f });
-        m_cycle->setPosition({ W / 2.f, H - 160.f });
-        m_mainLayer->addChild(m_cycle);
+        // the progression of this level
+        m_progText = CCLabelBMFont::create("", "chatFont.fnt");
+        m_progText->setScale(0.55f);
+        m_progText->setAlignment(kCCTextAlignmentCenter);
+        m_progText->setAnchorPoint({ 0.5f, 1.f });
+        m_progText->setPosition({ W / 2.f, H - 156.f });
+        m_mainLayer->addChild(m_progText);
 
         float left = W / 2.f - 80.f, right = W / 2.f + 80.f;
         addButton(menu, "Choose Macro", menu_selector(AutoplayMenu::onChooseMacro), { left, H - 216.f });
         addButton(menu, "Macros Folder", menu_selector(AutoplayMenu::onMacros), { right, H - 216.f });
         addButton(menu, "Forget Level", menu_selector(AutoplayMenu::onForget), { left, H - 242.f });
         addButton(menu, "Forget Macro", menu_selector(AutoplayMenu::onForgetMacro), { right, H - 242.f });
-        addButton(menu, "Reset Cycle", menu_selector(AutoplayMenu::onResetCycle), { left, H - 268.f });
+        addButton(menu, "Progression", menu_selector(AutoplayMenu::onProgression), { left, H - 268.f });
         addButton(menu, "Settings", menu_selector(AutoplayMenu::onSettings), { right, H - 268.f });
 
         refresh();
@@ -8311,9 +8690,9 @@ class $modify(BufPlayLayer, PlayLayer) {
         // test 76: player 2 dying in a dual part is a death too (tests 27-75 didn't see it: no log, and a
         // macro that died there was never planned around)
         bool p2Dual = player == m_player2 && m_gameState.m_isDualMode && m_player1 && !m_player1->m_isDead;
-        if (cyc.failing && autoplay.active && !buf.simulating && (player == m_player1 || p2Dual) && !player->m_isDead &&
+        if (prog.failing && autoplay.active && !buf.simulating && (player == m_player1 || p2Dual) && !player->m_isDead &&
             object != m_anticheatSpike && !autoplay.diedThisAttempt) {
-            // Cycle: a death made on purpose: nothing is learned from it and no spot is marked
+            // the progression: a death made on purpose: nothing is learned from it and no spot is marked
             autoplay.diedThisAttempt = true;
         }
         else if (autoplay.active && !buf.simulating && (player == m_player1 || p2Dual) && !player->m_isDead && object != m_anticheatSpike &&
@@ -8422,7 +8801,7 @@ class $modify(BufPlayLayer, PlayLayer) {
         }
         dropGhosts();
         readSettings();
-        cycleForgetLayer();  // a new level: nothing of the last one's is touched
+        progForgetLayer();  // a new level: nothing of the last one's is touched
         safeLayer = nullptr;
         exportLines.clear();
         logClock = 0;
@@ -8541,7 +8920,7 @@ class $modify(BufPlayLayer, PlayLayer) {
     void levelComplete() {
         bool wasGenerating = autoplay.active && autoplay.layer == this && autoplay.generating;
         if (autoplay.active && autoplay.layer == this) {
-            cycleAttemptEnd(this, true);
+            progAttemptEnd(this, true);
         }
         autoplayFinished(this);
         if (wasGenerating) {
@@ -8568,17 +8947,16 @@ class $modify(BufPlayLayer, PlayLayer) {
         // test 81: or player 2 died in a dual part (player 1 isn't dead then)
         bool p2Died = m_gameState.m_isDualMode && m_player2 && m_player2->m_isDead;
         if (autoplay.active && autoplay.layer == this && ((m_player1 && m_player1->m_isDead) || p2Died || autoplay.diedThisAttempt)) {
-            // Cycle: a death it made on purpose counts for the cycle only; autoplay's own learning
+            // the progression: a death made on purpose counts for it only; autoplay's own learning
             // (the route, a macro's fixes) doesn't see it
-            bool onPurpose = cyc.failing;
-            cycleAttemptEnd(this, false);
+            bool onPurpose = prog.failing;
+            progAttemptEnd(this, false);
             if (!onPurpose) {
                 autoplayDied(this);
             }
         }
-        else if (cyc.running) {
-            cyc.running = false;  // restarted by hand: not an attempt
-            cyc.failing = false;
+        else if (prog.running) {
+            progStopAttempt();  // restarted by hand: not an attempt
         }
         triggerChecks.clear();  // v2.84
         attemptStartTick = tickCount;  // v2.84.3
@@ -9217,6 +9595,17 @@ $on_mod(Loaded) {
     queueInMainThread([] { CBF_STEP("first frame"); });
 }
 
+// the level's page: remembered, so the Progression window can be opened for it outside the level
+class $modify(BufLevelInfoLayer, LevelInfoLayer) {
+    bool init(GJGameLevel* level, bool challenge) {
+        if (!LevelInfoLayer::init(level, challenge)) {
+            return false;
+        }
+        lastViewedLevel = level;
+        return true;
+    }
+};
+
 // the main menu: the update check
 class $modify(BufMenuLayer, MenuLayer) {
     bool init() {
@@ -9244,6 +9633,7 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
     // test 72: macro inputs go in here, at the start of the step, the way bots press them
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         if (autoplay.active && !buf.simulating && static_cast<GJBaseGameLayer*>(autoplay.layer) == static_cast<GJBaseGameLayer*>(this)) {
+            progKillIfDue(autoplay.layer);  // the progression's "Exact" death
             macroStep(autoplay.layer);
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
