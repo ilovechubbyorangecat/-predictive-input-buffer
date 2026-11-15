@@ -196,6 +196,7 @@ namespace {
         bool laterOrbTouched = false;  // v2.78: the run reached another orb after the one your click used
         int orbUsedTick = -1;        // v2.6: first tick the current run actually used an orb
         bool driftCheck = false;     // the route's step check (debug): the ghost's step next to yours
+        int shipCps = 10;            // the most clicks a second autoplay plans in ship
         std::vector<CCPoint>* recordPath = nullptr;  // v2.4: ghost1 positions of the current run
         // v3.0 test 26: spots where autoplay really died although the ghost thought it was safe
         // (something the ghost can't see). Its ghost counts touching them as a death.
@@ -574,6 +575,7 @@ namespace {
         buf.predictTriggers = mod->getSettingValue<bool>("predict-move-triggers");
         buf.userBudget = mod->getSettingValue<double>("sim-budget-ms");
         buf.driftCheck = mod->getSettingValue<bool>("drift-check");
+        buf.shipCps = static_cast<int>(std::clamp<int64_t>(mod->getSettingValue<int64_t>("ship-max-cps"), 3, 60));
         buf.explain = mod->getSettingValue<bool>("explain-inputs");
     }
 
@@ -4211,6 +4213,16 @@ namespace online {
         return survived;
     }
 
+    // The ship click limit: the fewest ticks between two button changes autoplay plans in ship
+    // (a click is a press and a release, so N clicks a second is 2N changes). Without it the
+    // planner kept a ship level with a change every few ticks (30+ clicks a second), which no
+    // showcase should look like. `relax`: how many times the route was stuck at this spot before;
+    // each time halves the gap, so a part that really needs faster clicks still gets through.
+    int shipFlipGap(int relax) {
+        int gap = st(240) / (2 * std::max(1, buf.shipCps));
+        return std::max(1, gap >> std::clamp(relax, 0, 5));
+    }
+
     // depth-limited search: flips go in right before the ghost would die, latest first (late and
     // few flips is how a player plays); returns ticks survived, `best` gets the longest plan seen
     bool planOutOfTime() {
@@ -4255,8 +4267,11 @@ namespace online {
         for (int b = 1; st(b) <= survived - lastRel; b += stepBack) {
             backs.push_back(b);
         }
+        // in ship a new change keeps its distance from the last one (the click limit)
+        bool ship = c.p1->m_isShip || (c.p2 && c.p2->m_isShip);
+        int minT = lastRel + ((ship && !plan.empty()) ? shipFlipGap(0) : 1);
         for (int back : backs) {
-            int t = std::max(survived - st(back), lastRel + 1);
+            int t = std::max(survived - st(back), minT);
             if (t < 0 || t > survived || banned(t)) {
                 continue;
             }
@@ -4275,7 +4290,7 @@ namespace online {
                 child.push_back(tickCount + t);
                 push(std::move(child));
             }
-            if (t == lastRel + 1) {
+            if (t == minT) {
                 break;
             }
         }
@@ -5290,7 +5305,9 @@ namespace online {
         route.sprinting = true;
         route.death = death;
         int lastFlip = route.flips.empty() ? -1000000 : route.flips.back();
-        route.lower = std::max({ death - st(240 + 60 * routeStuckHere(death)), lastFlip + 1, tickCount + 1, route.cps.front().tick });
+        // in ship the new input keeps its distance from the last one (the click limit)
+        int gap = routeCpAtOrBefore(death).snap->m_isShip ? shipFlipGap(routeStuckHere(death)) : 1;
+        route.lower = std::max({ death - st(240 + 60 * routeStuckHere(death)), lastFlip + gap, tickCount + 1, route.cps.front().tick });
         // v3.0 test 32: right after a take-back, only inputs BEFORE the one taken back: test 31 put
         // nearly the same input back a tick or two off (a wave turn at the same peak, 8 times over)
         route.cand = std::min(death - 1, route.beforeLimit - st(2));
@@ -5798,6 +5815,14 @@ namespace online {
             int v = pf.variant;
             std::vector<int> flips;
             bool have = v <= 7 && pfVariant(node, v, step, flips);
+            if (have && v >= 1 && v <= 6 && node.snap->m_isShip) {
+                // the click limit: a path in ship doesn't change the button again right after its
+                // last change (wave is left alone: it needs quick turns)
+                int last = !node.flips.empty() ? node.flips.back() : !pf.base.empty() ? pf.base.back() : INT_MIN / 2;
+                if (flips.front() - last < shipFlipGap(routeStuckHere(pf.death))) {
+                    have = false;
+                }
+            }
             if (have) {
                 RoutePoint from { node.tick, node.snap, node.held, node.hasB, node.lo, node.hi };
                 pfOut = nullptr;

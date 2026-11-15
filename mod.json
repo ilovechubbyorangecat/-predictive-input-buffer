@@ -90,6 +90,20 @@
 			"min": 1.0,
 			"max": 30.0
 		},
+		"ship-max-cps": {
+			"type": "int",
+			"name": "Ship click limit (CPS)",
+			"description": "The most clicks per second autoplay's own route uses in ship. Lower looks more like a player; a part it gets stuck in is tried again with faster clicks. Wave isn't limited, and a macro plays its own clicks whatever this says.",
+			"default": 10,
+			"min": 3,
+			"max": 60,
+			"control": {
+				"slider": true,
+				"input": true,
+				"arrows": true,
+				"big-arrows": false
+			}
+		},
 		"predict-move-triggers": {
 			"type": "bool",
 			"name": "Predict move triggers",

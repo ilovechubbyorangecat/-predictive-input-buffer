@@ -30,6 +30,7 @@ One small popup: Start / Stop Autoplay, the Take Over checkbox, Choose Macro, Ma
 - Autoplay Label (big at the top, or small in the corner for showcases) and Show Autoplay Trail.
 - Global Brain, Online Macros, Macro Position Fixes, Macro Plays At Its TPS, Play xdBot Macros Like xdBot, Macro Timing Offset.
 - Physics TPS and the planning time budget.
+- Ship click limit (CPS): the most clicks per second autoplay's own route uses in ship (10 by default). A part it gets stuck in is tried again with faster clicks. Wave isn't limited, and a macro plays its own clicks.
 - Prediction for autoplay's hidden player: move triggers, moving objects, through portals.
 - Debug: route step check, log trigger checks, a Windows console window.
 
