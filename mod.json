@@ -69,7 +69,7 @@
 		"progression-death": {
 			"type": "string",
 			"name": "How an attempt ends",
-			"description": "Natural: a quarter of a second before the forecast percentage autoplay misses a click or misclicks and crashes, so it dies about there (usually within 1%). Exact: it plays perfectly and dies right at the percentage, even in mid-air.",
+			"description": "Natural: a quarter of a second before the forecast percentage autoplay misses a click or misclicks and crashes, so it dies about there. Exact: it plays perfectly and dies right at the percentage, even in mid-air.",
 			"default": "Natural",
 			"one-of": [
 				"Natural",
