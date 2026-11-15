@@ -51,6 +51,7 @@
 #include <random>
 #include <unordered_map>
 #include <unordered_set>
+#include "cycle.hpp"
 #include <vector>
 
 using namespace geode::prelude;
@@ -4061,6 +4062,310 @@ namespace online {
         say("Click Between Frames: switched off while the macro plays{} (back when autoplay stops)", bypass ? ", and its Physics Bypass" : "");
     }
 
+    // ===== the Cycle system: autoplay learns the level like a player (the model is in cycle.hpp) =====
+    // While it is on, autoplay makes mistakes on purpose. Each attempt it decides where it will
+    // die from how well it knows each 1% of the level, plays normally up to there, then misses a
+    // click (or clicks wrong) and crashes. What it got through is practised, so over the attempts
+    // it gets further and more consistent. Skill is kept per 1% of the level and per level, so a
+    // part practised from a start position is known when a run from 0% reaches it.
+    // Autoplay's own learning (the route, a macro's fixes) never sees a death made on purpose.
+    void autoplayButton(PlayLayer* layer, bool down);
+
+    constexpr char const* CYCLE_CUSTOM = "Custom";
+
+    struct CycleState {
+        bool enabled = false;
+        bool hud = true;
+        std::string preset = "Casual";
+        cycle::Params params;
+        cycle::Params solvedFor;
+        bool solved = false;
+        float rate = 0.2f;
+        cycle::Memory memory;
+        std::string key;          // the level the memory is of ("" = none loaded)
+        // this attempt
+        bool running = false;     // the attempt is followed (and counts when it ends)
+        bool needStart = false;   // its first tick hasn't been seen yet
+        float start = 0.f;        // where it started (%)
+        float percent = 0.f;      // where it is now (%)
+        float deathAt = 1000.f;   // where it will make its mistake (%), 100+ = nowhere
+        bool failing = false;     // the mistake is being made: the bot's inputs are off
+        bool misclick = false;
+        int failTick = 0;
+        int nextPress = 0;
+        CCLabelBMFont* label = nullptr;
+        cycle::Rng rng { static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()) | 1ull };
+    };
+    CycleState cyc;
+
+    std::filesystem::path cycleDir() {
+        return Mod::get()->getSaveDir() / "cycle";
+    }
+
+    // one memory per level, whatever start position is played
+    std::string cycleLevelKey(PlayLayer* layer) {
+        auto* level = layer ? layer->m_level : nullptr;
+        if (!level) {
+            return "";
+        }
+        int id = level->m_levelID.value();
+        if (id > 0) {
+            return fmt::format("level_{}", id);
+        }
+        std::string name = level->m_levelName;
+        for (auto& ch : name) {
+            if (!std::isalnum(static_cast<unsigned char>(ch))) {
+                ch = '_';
+            }
+        }
+        return "local_" + name;
+    }
+
+    void cycleReadSettings() {
+        auto* mod = Mod::get();
+        cyc.enabled = mod->getSettingValue<bool>("cycle-enabled");
+        cyc.hud = mod->getSettingValue<bool>("cycle-hud");
+        cyc.preset = mod->getSettingValue<std::string>("cycle-preset");
+        cycle::Params p;
+        bool found = false;
+        for (auto const& preset : cycle::PRESETS) {
+            if (cyc.preset == preset.name) {
+                p = preset.params;
+                found = true;
+            }
+        }
+        if (!found) {
+            // Custom: every number is yours
+            cyc.preset = CYCLE_CUSTOM;
+            p.attempts = static_cast<int>(mod->getSettingValue<int64_t>("cycle-attempts"));
+            p.progress = static_cast<float>(mod->getSettingValue<int64_t>("cycle-progress"));
+            p.noobFail = static_cast<float>(mod->getSettingValue<double>("cycle-noob-fail")) / 100.f;
+            p.choke = static_cast<float>(mod->getSettingValue<double>("cycle-choke")) / 100.f;
+            p.curve = static_cast<float>(mod->getSettingValue<double>("cycle-curve"));
+            p.practiceBoost = static_cast<float>(mod->getSettingValue<double>("cycle-practice-boost"));
+            p.retention = static_cast<float>(mod->getSettingValue<int64_t>("cycle-retention")) / 100.f;
+        }
+        cyc.params = cycle::clamped(p);
+        if (!cyc.solved || !(cyc.solvedFor == cyc.params)) {
+            cyc.rate = cycle::solveRate(cyc.params);
+            cyc.solvedFor = cyc.params;
+            cyc.solved = true;
+            if (cyc.enabled) {
+                say("cycle: {} ({}% after {} attempts): learns {:.1f}% of a part each time through it", cyc.preset, cyc.params.progress,
+                    cyc.params.attempts, cyc.rate * 100.f);
+            }
+        }
+    }
+
+    void cycleLoad(PlayLayer* layer) {
+        auto key = cycleLevelKey(layer);
+        if (key == cyc.key) {
+            return;
+        }
+        cyc.key = key;
+        cyc.memory = {};
+        if (key.empty()) {
+            return;
+        }
+        std::ifstream in(cycleDir() / (key + ".txt"));
+        if (in) {
+            std::stringstream text;
+            text << in.rdbuf();
+            if (!cycle::deserialize(text.str(), cyc.memory)) {
+                cyc.memory = {};
+                say("cycle: this level's saved memory couldn't be read, it starts as a beginner");
+            }
+        }
+    }
+
+    void cycleSave() {
+        if (cyc.key.empty()) {
+            return;
+        }
+        std::error_code ec;
+        std::filesystem::create_directories(cycleDir(), ec);
+        std::ofstream out(cycleDir() / (cyc.key + ".txt"), std::ios::trunc);
+        if (out) {
+            out << cycle::serialize(cyc.memory);
+        }
+    }
+
+    // what the HUD and the window show
+    std::string cycleSummary(bool withRun) {
+        auto const& m = cyc.memory;
+        float avg = m.average();
+        auto text = fmt::format("Cycle: {} - {} (skill {:.0f}%)\nAttempt {}  -  Best {:.0f}%", cyc.preset, cycle::stageName(avg), avg * 100.f,
+            m.attempts + (cyc.running ? 1 : 0), m.best);
+        if (m.completions > 0) {
+            text += fmt::format("  -  Beaten x{}", m.completions);
+        }
+        if (withRun && cyc.running && !cyc.needStart && cyc.start >= 0.5f) {
+            text += fmt::format("  -  This run from {:.0f}%", cyc.start);
+        }
+        if (!m.runs.empty()) {
+            text += "\nPracticed: " + cycle::runsText(m);
+        }
+        return text;
+    }
+
+    void cycleHudUpdate(PlayLayer* layer) {
+        bool show = cyc.enabled && cyc.hud && autoplay.active && layer && autoplay.layer == layer && !layer->m_isPracticeMode;
+        if (!show) {
+            if (cyc.label) {
+                cyc.label->setVisible(false);
+            }
+            return;
+        }
+        if (!cyc.label) {
+            cyc.label = CCLabelBMFont::create("", "chatFont.fnt");
+            cyc.label->setScale(0.5f);
+            cyc.label->setOpacity(190);
+            cyc.label->setAnchorPoint({ 0.f, 1.f });
+            cyc.label->setAlignment(kCCTextAlignmentLeft);
+            cyc.label->setPosition({ 6.f, CCDirector::get()->getWinSize().height - 6.f });
+            cyc.label->setID("cycle-label"_spr);
+            layer->addChild(cyc.label, 1000);
+        }
+        cyc.label->setVisible(true);
+        cyc.label->setString(cycleSummary(true).c_str());
+    }
+
+    // the level went away with its label: only forgotten
+    void cycleForgetLayer() {
+        cyc.label = nullptr;
+        cyc.running = false;
+        cyc.failing = false;
+    }
+
+    void cycleRemoveLabel() {
+        if (cyc.label) {
+            cyc.label->removeFromParent();
+            cyc.label = nullptr;
+        }
+    }
+
+    // a new attempt (or autoplay was switched on: `midAttempt`, which isn't a whole attempt)
+    void cycleAttemptStart(PlayLayer* layer, bool midAttempt) {
+        cycleReadSettings();
+        cyc.failing = false;
+        cyc.running = false;
+        cyc.needStart = false;
+        cyc.deathAt = 1000.f;
+        if (cyc.enabled) {
+            cycleLoad(layer);
+            cyc.running = !midAttempt && !layer->m_isPracticeMode && !cyc.key.empty();
+            cyc.needStart = cyc.running;
+        }
+        cycleHudUpdate(layer);
+    }
+
+    // once a physics step while autoplay plays; true: the mistake is being made, autoplay's own
+    // inputs stay off
+    bool cycleTick(PlayLayer* layer, PlayerObject* p1) {
+        if (!cyc.running) {
+            return false;
+        }
+        cyc.percent = std::clamp(layer->getCurrentPercent(), 0.f, 100.f);
+        if (cyc.needStart) {
+            cyc.needStart = false;
+            cyc.start = cyc.percent;
+            if (cyc.start < 0.5f) {
+                cyc.start = 0.f;
+            }
+            cyc.deathAt = cycle::planDeath(cyc.params, cyc.memory, cyc.start, cyc.rng);
+            cycleHudUpdate(layer);
+            say("cycle: attempt {} from {:.0f}% ({}, skill {:.0f}%): {}", cyc.memory.attempts + 1, cyc.start, cycle::stageName(cyc.memory.average()),
+                cyc.memory.average() * 100.f,
+                cyc.deathAt >= 100.f ? std::string("no mistake planned") : fmt::format("a mistake at {:.1f}%", cyc.deathAt));
+        }
+        if (!cyc.failing) {
+            if (cyc.percent < cyc.deathAt) {
+                return false;
+            }
+            // the mistake starts: from here autoplay's inputs are off, and nothing of this attempt
+            // is learned by the route or sent to the global brain
+            cyc.failing = true;
+            cyc.failTick = tickCount;
+            cyc.misclick = cyc.rng.unit() < 0.4f;
+            cyc.nextPress = tickCount + (cyc.misclick ? 0 : st(170));
+            autoplay.userTouched = true;
+            autoplay.plan.clear();
+        }
+        // a missed click: the button stays as it was for 0.7 s. A misclick: it changes at once. If
+        // that didn't crash it, it keeps pressing at random (a player who lost the rhythm).
+        if (tickCount >= cyc.nextPress) {
+            autoplayButton(layer, !buf.appliedInput);
+            bool first = cyc.misclick && tickCount == cyc.failTick;
+            cyc.nextPress = tickCount + (first ? st(170) : st(30) + static_cast<int>(cyc.rng.unit() * st(90)));
+        }
+        return true;
+    }
+
+    // the attempt ended: a death (`finished` false) or the end of the level
+    void cycleAttemptEnd(PlayLayer* layer, bool finished) {
+        if (!cyc.running) {
+            return;
+        }
+        cyc.running = false;
+        bool onPurpose = cyc.failing;
+        cyc.failing = false;
+        if (cyc.needStart) {
+            return;  // it ended before its first step: nothing to count
+        }
+        float before = cyc.memory.average();
+        cycle::learn(cyc.params, cyc.memory, cyc.rate, cyc.start, cyc.percent, finished);
+        cycleSave();
+        say("cycle: attempt {} {:.0f}%-{:.0f}% {} - skill {:.1f}% -> {:.1f}% ({}), best {:.0f}%", cyc.memory.attempts, cyc.start,
+            finished ? 100.f : cyc.percent, finished ? "reached the end" : onPurpose ? "died (its mistake)" : "died (autoplay's own death)",
+            before * 100.f, cyc.memory.average() * 100.f, cycle::stageName(cyc.memory.average()), cyc.memory.best);
+        cycleHudUpdate(layer);
+    }
+
+    // Reset: forget this level (in a level) or every level (from the menus)
+    int cycleReset(PlayLayer* layer) {
+        std::error_code ec;
+        int removed = 0;
+        if (layer) {
+            cycleLoad(layer);
+            if (!cyc.key.empty() && std::filesystem::remove(cycleDir() / (cyc.key + ".txt"), ec)) {
+                ++removed;
+            }
+        }
+        else {
+            removed = static_cast<int>(std::filesystem::remove_all(cycleDir(), ec));
+            cyc.key.clear();
+        }
+        cyc.memory = {};
+        cyc.running = false;  // the attempt in progress doesn't count either
+        cyc.failing = false;
+        say("cycle: {} forgotten, it is a complete beginner again", layer ? "this level is" : "every level is");
+        cycleHudUpdate(layer);
+        return removed;
+    }
+
+    // ===== Safe Mode and the AUTOPLAY text (work with or without Cycle) =====
+    // Safe Mode on: the level is in the game's test mode while autoplay is on, so the game saves no
+    // completion, progress or stats. Off: the level keeps the mode it was opened in.
+    PlayLayer* safeLayer = nullptr;   // the level whose own test mode flag is remembered
+    bool safeOriginal = false;
+
+    void applySafeMode(PlayLayer* layer) {
+        if (!layer) {
+            return;
+        }
+        if (safeLayer != layer) {
+            safeLayer = layer;
+            safeOriginal = layer->m_isTestMode;
+        }
+        layer->m_isTestMode = Mod::get()->getSettingValue<bool>("safe-mode") ? true : safeOriginal;
+    }
+
+    void applyAutoplayText() {
+        if (autoplay.tag) {
+            autoplay.tag->setVisible(!Mod::get()->getSettingValue<bool>("hide-autoplay-text"));
+        }
+    }
+
     void stopAutoplay(char const* why) {
         tpsOverride = 0;
         if (cbfOverridden) {
@@ -4075,6 +4380,7 @@ namespace online {
             if (autoplay.tag) {
                 autoplay.tag->removeFromParent();
             }
+            cycleRemoveLabel();
             if (autoplay.trailNode) {
                 autoplay.trailNode->removeFromParent();
             }
@@ -4088,6 +4394,7 @@ namespace online {
             }
         }
         say("autoplay off{} ({} inputs)", why, autoplay.inputs);
+        cycleForgetLayer();
         routeReset();
         buf.objIndex.clear();
         autoplay = {};
@@ -4097,6 +4404,8 @@ namespace online {
 
     // a level that was left without quitting: its label went with it, so it's only forgotten
     void forgetAutoplay() {
+        cycleForgetLayer();
+        safeLayer = nullptr;
         routeReset();
         dropSnaps(false);  // the level they belonged to is gone
         buf.objIndex.clear();
@@ -4123,8 +4432,8 @@ namespace online {
             *why = "The level isn't ready yet, try again in a moment.";
             return false;
         }
-        // the game itself saves nothing (progress, completion, stars) in test mode
-        layer->m_isTestMode = true;
+        // Safe Mode: the game itself saves nothing (progress, completion, stars) in test mode
+        applySafeMode(layer);
         autoplay = {};
         buf.autoDangers.clear();
         autoplay.active = true;
@@ -4134,10 +4443,9 @@ namespace online {
         auto win = CCDirector::get()->getWinSize();
         autoplay.takeOver = Mod::get()->getSavedValue<bool>("autoplay-takeover", false);
         // the label stays the whole time autoplay is on (also while you play with Take Over),
-        // so a recording always shows the run wasn't played by hand
+        // unless Hide Autoplay Text is on
         autoplay.tag = CCLabelBMFont::create(autoplay.takeOver ? "AUTOPLAY - TAKE OVER" : "AUTOPLAY", "bigFont.fnt");
-        // v3.0.1: the label always shows (viewers have to be able to tell it isn't a real run), but
-        // it can be small, in the bottom corner, for showcases
+        // v3.0.1: it can be small, in the bottom corner, for showcases
         if (Mod::get()->getSettingValue<std::string>("autoplay-label") == "Small") {
             autoplay.tag->setScale(0.32f);
             autoplay.tag->setColor({ 255, 255, 255 });
@@ -4153,7 +4461,11 @@ namespace online {
         }
         autoplay.tag->setID("autoplay-label"_spr);
         layer->addChild(autoplay.tag, 1000);
-        say("autoplay on: the level is in test mode, nothing is saved as progress");
+        applyAutoplayText();
+        say("autoplay on: {}", Mod::get()->getSettingValue<bool>("safe-mode")
+            ? "Safe Mode, the level is in test mode and nothing is saved as progress"
+            : "Safe Mode is OFF, the game saves this level's progress and completions as if you played");
+        cycleAttemptStart(layer, true);
         autoplay.trailNode = CCDrawNode::create();
         autoplay.trailNode->setID("autoplay-trail"_spr);
         autoplay.trailNode->setVisible(Mod::get()->getSettingValue<bool>("autoplay-trail"));  // v3.0.1: hidden for showcases
@@ -4520,6 +4832,7 @@ namespace online {
         autoplay.diedThisAttempt = false;
         autoplay.reports = 0;
         clearQueue();
+        cycleAttemptStart(layer, false);
     }
 
     // a death: keep this attempt's inputs up to a bit before it (normal mode, bot-only attempts)
@@ -6844,7 +7157,7 @@ namespace online {
     // handlePlaying): every input up to this frame, then every position record up to it (x, y, angle)
     void macroStepXd(PlayLayer* layer) {
         if (!autoplay.active || autoplay.layer != layer || autoplay.macro.empty() || layer->m_isPracticeMode || buf.simulating ||
-            !macroUsable(layer) || layer->m_levelEndAnimationStarted) {
+            !macroUsable(layer) || layer->m_levelEndAnimationStarted || cyc.failing) {
             return;
         }
         int frame = macroNow(layer);
@@ -6916,7 +7229,7 @@ namespace online {
     }
 
     void macroStep(PlayLayer* layer) {
-        if (!autoplay.active || autoplay.layer != layer || autoplay.macro.empty() || layer->m_isPracticeMode || buf.simulating) {
+        if (!autoplay.active || autoplay.layer != layer || autoplay.macro.empty() || layer->m_isPracticeMode || buf.simulating || cyc.failing) {
             return;
         }
         if (autoplay.macroXd) {
@@ -7255,6 +7568,14 @@ namespace online {
             return;
         }
         measureProgress(layer);  // test 74: once a physics step
+        // Cycle: you playing with Take Over isn't the bot's attempt; its mistake keeps autoplay's inputs off
+        if (cyc.running && autoplay.takeOver && tickCount < autoplay.userUntil) {
+            cyc.running = false;
+            cyc.failing = false;
+        }
+        if (cycleTick(layer, p1)) {
+            return;
+        }
         // v3.1.1: the run's position every 3 steps (for the global brain)
         {
             int step = static_cast<int>(layer->m_gameState.m_currentProgress) / std::max(1, progressPerStepNow());
@@ -7613,27 +7934,132 @@ public:
 
 // The window (Ctrl+Q): start / stop, Take Over, the macro buttons, and the mod's settings.
 class AutoplayMenu : public geode::Popup {
-    static constexpr float W = 300.f, H = 220.f;
+    static constexpr float W = 350.f, H = 292.f;
     static inline AutoplayMenu* s_open = nullptr;
     CCLabelBMFont* m_status = nullptr;
     ButtonSprite* m_startSprite = nullptr;
+    CCLabelBMFont* m_preset = nullptr;
+    CCLabelBMFont* m_cycle = nullptr;
 
-    void addButton(CCMenu* menu, char const* text, SEL_MenuHandler action, CCPoint pos) {
+    void addButton(CCMenu* menu, char const* text, SEL_MenuHandler action, CCPoint pos, int tag = 0) {
         auto* sprite = ButtonSprite::create(text, "goldFont.fnt", "GJ_button_04.png", 0.6f);
         sprite->setScale(0.75f);
         auto* item = CCMenuItemSpriteExtra::create(sprite, this, action);
         item->setPosition(pos);
+        item->setTag(tag);
         menu->addChild(item);
     }
 
+    // a checkbox with its name to the right of it
+    void addToggle(CCMenu* menu, char const* text, bool on, SEL_MenuHandler action, CCPoint pos) {
+        auto* toggle = CCMenuItemToggler::createWithStandardSprites(this, action, 0.55f);
+        toggle->toggle(on);
+        toggle->setPosition(pos);
+        menu->addChild(toggle);
+        auto* name = CCLabelBMFont::create(text, "bigFont.fnt");
+        name->setScale(0.32f);
+        name->setAnchorPoint({ 0.f, 0.5f });
+        name->setPosition({ pos.x + 14.f, pos.y });
+        m_mainLayer->addChild(name);
+    }
+
     void refresh() {
-        bool inLevel = GameManager::get()->m_playLayer != nullptr;
+        auto* layer = GameManager::get()->m_playLayer;
         if (m_status) {
-            m_status->setString(inLevel ? statusText().c_str() : "Open a level to start autoplay");
+            m_status->setString(layer ? statusText().c_str() : "Open a level to start autoplay");
         }
         if (m_startSprite) {
             m_startSprite->setString(autoplay.active ? "Stop Autoplay" : "Start Autoplay");
         }
+        cycleReadSettings();
+        if (layer) {
+            cycleLoad(layer);
+        }
+        if (m_preset) {
+            m_preset->setString(cyc.preset.c_str());
+        }
+        if (m_cycle) {
+            std::string text;
+            if (!cyc.enabled) {
+                text = "Cycle is off: autoplay plays as well as it can";
+            }
+            else if (!layer) {
+                text = fmt::format("Cycle: {} ({:.0f}% after {} attempts)\nOpen a level to see what it has learned there", cyc.preset,
+                    cyc.params.progress, cyc.params.attempts);
+            }
+            else {
+                text = cycleSummary(false) + fmt::format("\nChance to beat it from 0% now: {:.1f}%",
+                    cycle::finishChance(cyc.params, cyc.memory, 0.f) * 100.f);
+            }
+            m_cycle->setString(text.c_str());
+        }
+        cycleHudUpdate(layer);
+    }
+
+    // the checkboxes are mod settings (they are in the Geode settings too)
+    bool flipSetting(char const* key) {
+        bool on = !Mod::get()->getSettingValue<bool>(key);
+        Mod::get()->setSettingValue<bool>(key, on);
+        return on;
+    }
+
+    void onCycle(CCObject*) {
+        bool on = flipSetting("cycle-enabled");
+        say("cycle {}", on ? "on: autoplay learns the level like a player (from the next attempt)" : "off");
+        if (!on) {
+            cyc.running = false;  // an attempt in progress plays on without a mistake
+            cyc.failing = false;
+        }
+        refresh();
+    }
+
+    void onSafeMode(CCObject*) {
+        bool on = flipSetting("safe-mode");
+        say("safe mode {}", on ? "on: nothing autoplay plays is saved" : "OFF: the game saves progress and completions while autoplay plays");
+        if (autoplay.active && autoplay.layer == GameManager::get()->m_playLayer) {
+            applySafeMode(autoplay.layer);
+        }
+    }
+
+    void onHideText(CCObject*) {
+        flipSetting("hide-autoplay-text");
+        applyAutoplayText();
+    }
+
+    // the five presets, then Custom (its numbers are in Settings)
+    void onPreset(CCObject* sender) {
+        std::vector<std::string> names;
+        for (auto const& preset : cycle::PRESETS) {
+            names.push_back(preset.name);
+        }
+        names.push_back(CYCLE_CUSTOM);
+        int n = static_cast<int>(names.size());
+        int at = 0;
+        for (int i = 0; i < n; ++i) {
+            if (names[i] == cyc.preset) {
+                at = i;
+            }
+        }
+        at = (at + static_cast<CCNode*>(sender)->getTag() + n) % n;
+        Mod::get()->setSettingValue<std::string>("cycle-preset", names[at]);
+        refresh();
+    }
+
+    void onResetCycle(CCObject*) {
+        auto* layer = GameManager::get()->m_playLayer;
+        createQuickPopup("Reset Cycle",
+            layer ? "Forget everything the cycle learned on <cy>this level</c>? Its attempts, its best and the runs it practiced are wiped, and it "
+                    "plays like a complete beginner again."
+                  : "Forget everything the cycle learned on <cr>every level</c>? (Open a level first to reset only that one.)",
+            "Cancel", "Reset", [](FLAlertLayer*, bool reset) {
+                if (!reset) {
+                    return;
+                }
+                cycleReset(GameManager::get()->m_playLayer);
+                if (s_open) {
+                    s_open->refresh();
+                }
+            });
     }
 
     void onSettings(CCObject*) {
@@ -7696,7 +8122,7 @@ class AutoplayMenu : public geode::Popup {
                 autoplay.tag->setString(on ? "AUTOPLAY - TAKE OVER" : "AUTOPLAY");
             }
         }
-        say("autoplay take over {}", on ? "on (nothing is saved, the label stays on screen)" : "off");
+        say("autoplay take over {}", on ? "on" : "off");
         refresh();
     }
 
@@ -7756,10 +8182,12 @@ protected:
         this->setTitle("Autoplay");
         s_open = this;
         readSettings();
+        cycleReadSettings();
+        auto* mod = Mod::get();
 
         m_status = CCLabelBMFont::create("", "chatFont.fnt");
         m_status->setScale(0.7f);
-        m_status->setPosition({ W / 2.f, H - 44.f });
+        m_status->setPosition({ W / 2.f, H - 42.f });
         m_mainLayer->addChild(m_status);
 
         auto* menu = CCMenu::create();
@@ -7769,25 +8197,44 @@ protected:
 
         m_startSprite = ButtonSprite::create("Start Autoplay", "goldFont.fnt", "GJ_button_01.png", 0.8f);
         auto* start = CCMenuItemSpriteExtra::create(m_startSprite, this, menu_selector(AutoplayMenu::onAutoplay));
-        start->setPosition({ W / 2.f, H - 76.f });
+        start->setPosition({ W / 2.f, H - 70.f });
         menu->addChild(start);
 
-        auto* toggle = CCMenuItemToggler::createWithStandardSprites(this, menu_selector(AutoplayMenu::onTakeOver), 0.6f);
-        toggle->toggle(Mod::get()->getSavedValue<bool>("autoplay-takeover", false));
-        toggle->setPosition({ W / 2.f - 74.f, H - 112.f });
-        menu->addChild(toggle);
-        auto* takeOver = CCLabelBMFont::create("Take Over (your clicks come first)", "bigFont.fnt");
-        takeOver->setScale(0.3f);
-        takeOver->setAnchorPoint({ 0.f, 0.5f });
-        takeOver->setPosition({ W / 2.f - 58.f, H - 112.f });
-        m_mainLayer->addChild(takeOver);
+        // the switches, two a row
+        float colA = 30.f, colB = W / 2.f + 12.f;
+        addToggle(menu, "Take Over", mod->getSavedValue<bool>("autoplay-takeover", false), menu_selector(AutoplayMenu::onTakeOver), { colA, H - 102.f });
+        addToggle(menu, "Cycle Mode", cyc.enabled, menu_selector(AutoplayMenu::onCycle), { colB, H - 102.f });
+        addToggle(menu, "Safe Mode", mod->getSettingValue<bool>("safe-mode"), menu_selector(AutoplayMenu::onSafeMode), { colA, H - 124.f });
+        addToggle(menu, "Hide Autoplay Text", mod->getSettingValue<bool>("hide-autoplay-text"), menu_selector(AutoplayMenu::onHideText),
+            { colB, H - 124.f });
 
-        float left = W / 2.f - 68.f, right = W / 2.f + 68.f;
-        addButton(menu, "Choose Macro", menu_selector(AutoplayMenu::onChooseMacro), { left, H - 146.f });
-        addButton(menu, "Macros Folder", menu_selector(AutoplayMenu::onMacros), { right, H - 146.f });
-        addButton(menu, "Forget Level", menu_selector(AutoplayMenu::onForget), { left, H - 174.f });
-        addButton(menu, "Forget Macro", menu_selector(AutoplayMenu::onForgetMacro), { right, H - 174.f });
-        addButton(menu, "Settings", menu_selector(AutoplayMenu::onSettings), { W / 2.f, H - 202.f });
+        // the cycle: its preset and what it has learned on this level
+        auto* presetName = CCLabelBMFont::create("Cycle preset", "bigFont.fnt");
+        presetName->setScale(0.32f);
+        presetName->setAnchorPoint({ 0.f, 0.5f });
+        presetName->setPosition({ colA - 8.f, H - 148.f });
+        m_mainLayer->addChild(presetName);
+        addButton(menu, "<", menu_selector(AutoplayMenu::onPreset), { W / 2.f - 28.f, H - 148.f }, -1);
+        addButton(menu, ">", menu_selector(AutoplayMenu::onPreset), { W - 30.f, H - 148.f }, 1);
+        m_preset = CCLabelBMFont::create("", "goldFont.fnt");
+        m_preset->setScale(0.55f);
+        m_preset->setPosition({ (W / 2.f - 28.f + W - 30.f) / 2.f, H - 148.f });
+        m_mainLayer->addChild(m_preset);
+
+        m_cycle = CCLabelBMFont::create("", "chatFont.fnt");
+        m_cycle->setScale(0.55f);
+        m_cycle->setAlignment(kCCTextAlignmentCenter);
+        m_cycle->setAnchorPoint({ 0.5f, 1.f });
+        m_cycle->setPosition({ W / 2.f, H - 160.f });
+        m_mainLayer->addChild(m_cycle);
+
+        float left = W / 2.f - 80.f, right = W / 2.f + 80.f;
+        addButton(menu, "Choose Macro", menu_selector(AutoplayMenu::onChooseMacro), { left, H - 216.f });
+        addButton(menu, "Macros Folder", menu_selector(AutoplayMenu::onMacros), { right, H - 216.f });
+        addButton(menu, "Forget Level", menu_selector(AutoplayMenu::onForget), { left, H - 242.f });
+        addButton(menu, "Forget Macro", menu_selector(AutoplayMenu::onForgetMacro), { right, H - 242.f });
+        addButton(menu, "Reset Cycle", menu_selector(AutoplayMenu::onResetCycle), { left, H - 268.f });
+        addButton(menu, "Settings", menu_selector(AutoplayMenu::onSettings), { right, H - 268.f });
 
         refresh();
         return true;
@@ -7864,7 +8311,12 @@ class $modify(BufPlayLayer, PlayLayer) {
         // test 76: player 2 dying in a dual part is a death too (tests 27-75 didn't see it: no log, and a
         // macro that died there was never planned around)
         bool p2Dual = player == m_player2 && m_gameState.m_isDualMode && m_player1 && !m_player1->m_isDead;
-        if (autoplay.active && !buf.simulating && (player == m_player1 || p2Dual) && !player->m_isDead && object != m_anticheatSpike &&
+        if (cyc.failing && autoplay.active && !buf.simulating && (player == m_player1 || p2Dual) && !player->m_isDead &&
+            object != m_anticheatSpike && !autoplay.diedThisAttempt) {
+            // Cycle: a death made on purpose: nothing is learned from it and no spot is marked
+            autoplay.diedThisAttempt = true;
+        }
+        else if (autoplay.active && !buf.simulating && (player == m_player1 || p2Dual) && !player->m_isDead && object != m_anticheatSpike &&
             !autoplay.diedThisAttempt) {
             int at = autoplay.attemptTick;
             bool replaying = !m_isPracticeMode && autoplay.knownUntil > 0 && at <= autoplay.knownUntil;
@@ -7970,6 +8422,8 @@ class $modify(BufPlayLayer, PlayLayer) {
         }
         dropGhosts();
         readSettings();
+        cycleForgetLayer();  // a new level: nothing of the last one's is touched
+        safeLayer = nullptr;
         exportLines.clear();
         logClock = 0;
         buf.ghost1 = makeGhost(this);
@@ -8086,6 +8540,9 @@ class $modify(BufPlayLayer, PlayLayer) {
 
     void levelComplete() {
         bool wasGenerating = autoplay.active && autoplay.layer == this && autoplay.generating;
+        if (autoplay.active && autoplay.layer == this) {
+            cycleAttemptEnd(this, true);
+        }
         autoplayFinished(this);
         if (wasGenerating) {
             return;  // the hidden run reached the end: no end screen, the shown run starts next frame
@@ -8111,7 +8568,17 @@ class $modify(BufPlayLayer, PlayLayer) {
         // test 81: or player 2 died in a dual part (player 1 isn't dead then)
         bool p2Died = m_gameState.m_isDualMode && m_player2 && m_player2->m_isDead;
         if (autoplay.active && autoplay.layer == this && ((m_player1 && m_player1->m_isDead) || p2Died || autoplay.diedThisAttempt)) {
-            autoplayDied(this);
+            // Cycle: a death it made on purpose counts for the cycle only; autoplay's own learning
+            // (the route, a macro's fixes) doesn't see it
+            bool onPurpose = cyc.failing;
+            cycleAttemptEnd(this, false);
+            if (!onPurpose) {
+                autoplayDied(this);
+            }
+        }
+        else if (cyc.running) {
+            cyc.running = false;  // restarted by hand: not an attempt
+            cyc.failing = false;
         }
         triggerChecks.clear();  // v2.84
         attemptStartTick = tickCount;  // v2.84.3
