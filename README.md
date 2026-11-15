@@ -7,9 +7,9 @@ Autoplay for level showcases. That is all this mod does now: the input buffer (d
 Not for verified or leaderboard runs: the level is put in test mode, nothing autoplay plays is saved as progress, and AUTOPLAY stays on screen the whole time.
 
 ## Keys
-7 menu | F8 copy the console log | F9 open/close the in-game console
+Ctrl+Q window | F8 copy the console log | F9 open/close the in-game console
 
-The keys can be changed in the mod's settings or in Geode's keybinds popup. The menu also opens from the button on the main menu and in the pause menu.
+Ctrl+Q opens the window anywhere (in a level it pauses first), and Ctrl+Q again closes it. There is no button for it in the pause menu or on the main menu, so on a phone without a keyboard the window can't be opened. The keys can be changed in the mod's settings or in Geode's keybinds popup.
 
 ## Autoplay
 - **Route planner**: plans a route up to 10 s ahead while it plays, with a pathfinder for wave and ship, and it learns from its deaths. What it learned on a level is saved (Forget Level clears it).
@@ -19,9 +19,7 @@ The keys can be changed in the mod's settings or in Geode's keybinds popup. The 
 - Platformer levels aren't supported.
 
 ## The window
-- **Log**: what autoplay did, with Copy Log and the on-screen console.
-- **Autoplay**: start / stop, Take Over, Forget Level, and the macro and global brain switches (Choose Macro, Macros Folder, Forget Macro).
-- **Settings** (the gear): window size and opacity, the pause menu button, Physics TPS, the prediction switches and updates.
+One small popup: Start / Stop Autoplay, the Take Over checkbox, Choose Macro, Macros Folder, Forget Level, Forget Macro, and Settings (which opens the mod's Geode settings). The log is on the in-game console (F9), and F8 copies it.
 
 ## Online (each can be turned off in the settings)
 - An anonymous id with your device type and version every 90 s (the online counter).

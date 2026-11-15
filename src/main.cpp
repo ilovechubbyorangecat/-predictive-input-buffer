@@ -2388,26 +2388,8 @@ namespace online {
         }).detach();
     }
 
-    std::string text() {
-        int on = nowOnline, off = nowOffline;
-        if (on < 0) {
-            return "";
-        }
-        return fmt::format("{} online  ·  {} offline", on, off);
-    }
 }
 
-    // test 91: the CBF icon, sized to a game button
-    CCSprite* cbfIcon(float size) {
-        auto* s = CCSprite::create("cbf-icon.png"_spr);
-        if (s && s->getContentSize().width > 0.f) {
-            s->setScale(size / s->getContentSize().width);
-        }
-        return s;
-    }
-
-    void manualUpdate();
-    std::string updateButtonText();
     bool updateAvailable();
     std::string levelFingerprint(GJGameLevel* level);
     void brainFetch(int levelId, std::string print, int forceTps = 0);
@@ -7604,1321 +7586,33 @@ public:
     }
 };
 
+// The window (Ctrl+Q): start / stop, Take Over, the macro buttons, and the mod's settings.
 class AutoplayMenu : public geode::Popup {
-    struct Option {
-        char const* key;    // mod setting
-        char const* label;
-        char const* sub;
-    };
-    static constexpr Option AUTOPLAY_OPTIONS[] = {
-        { "global-brain", "Global Brain", "Plays and shares finished runs" },
-        { "online-macros", "Online Macros", "Downloads a macro for the level" },
-        { "macro-fixes", "Macro Position Fixes", "Keeps you on the macro's path" },
-        { "macro-auto-tps", "Macro At Its TPS", "A macro plays at the TPS it was made at" },
-        { "macro-xdbot-mode", "xdBot Macros Like xdBot", "Played by xdBot's own frame count" },
-        { "autoplay-trail", "Show Trail", "Draws the planned path in the level" },
-    };
-    static constexpr Option PREDICTION[] = {
-        { "predict-move-triggers", "Move Triggers", "Follows triggers that move the level" },
-        { "predict-moving-objects", "Moving Objects", "Predicts blocks and spikes already moving" },
-        { "predict-through-portals", "Through Portals", "The hidden player goes through mode portals" },
-        { "drift-check", "Route Step Check", "Debug: the hidden player's step next to yours" },
-        { "explain-inputs", "Log Trigger Checks", "Debug: every trigger self-check in the Log" },
-    };
-    static constexpr char const* TABS[] = { "Log", "Autoplay" };
-    static constexpr int TAB_AUTOPLAY = 1;
-    static constexpr int TAB_SETTINGS = 2;
-
-    struct Theme {
-        ccColor3B main, soft, accent, bg;
-        char const* button;
-    };
-
-public:
-    static constexpr ccColor3B ACCENTS[] = { { 166, 107, 255 }, { 90, 150, 255 }, { 50, 200, 225 }, { 80, 205, 120 },
-        { 255, 160, 60 }, { 255, 95, 140 } };
-    static constexpr ccColor3B BACKS[] = { { 18, 12, 34 }, { 10, 16, 38 }, { 8, 26, 30 }, { 10, 28, 14 }, { 34, 20, 10 },
-        { 24, 24, 28 }, { 30, 14, 38 } };
-
-    static ccColor3B hueColor(int hue) {
-        float h = static_cast<float>(((hue % 360) + 360) % 360) / 60.f;
-        float x = 1.f - std::abs(std::fmod(h, 2.f) - 1.f);
-        float r = 0, g = 0, b = 0;
-        switch (static_cast<int>(h)) {
-            case 0: r = 1; g = x; break;
-            case 1: r = x; g = 1; break;
-            case 2: g = 1; b = x; break;
-            case 3: g = x; b = 1; break;
-            case 4: r = x; b = 1; break;
-            default: r = 1; b = x; break;
-        }
-        auto c = [](float v) { return static_cast<GLubyte>(70 + v * 185); };
-        return { c(r), c(g), c(b) };
-    }
-
-    static ccColor3B accentColor() {
-        if (!Mod::get()->hasSavedValue("ui-accent")) {
-            return { 255, 46, 59 };  // v3.2: the website's red
-        }
-        int i = Mod::get()->getSavedValue<int>("ui-accent", 0);
-        if (i >= 0 && i < static_cast<int>(std::size(ACCENTS))) {
-            return ACCENTS[i];
-        }
-        return hueColor(Mod::get()->getSavedValue<int>("ui-accent-hue", 262));
-    }
-
-    // a background colour made bright enough to see as a dot
-    static ccColor3B bright(ccColor3B c) {
-        auto k = [](GLubyte v) { return static_cast<GLubyte>(std::min(255, v * 3 + 20)); };
-        return { k(c.r), k(c.g), k(c.b) };
-    }
-
-    static ccColor3B mix(ccColor3B a, ccColor3B b, float t) {
-        auto m = [t](GLubyte x, GLubyte y) { return static_cast<GLubyte>(x + (y - x) * t); };
-        return { m(a.r, b.r), m(a.g, b.g), m(a.b, b.b) };
-    }
-
-    // the accent colour picked in the menu (the old "Menu theme" setting is no longer used)
-    static Theme currentTheme() {
-        auto a = accentColor();
-        return { a, mix(a, { 255, 255, 255 }, 0.6f), mix(a, { 255, 255, 255 }, 0.4f), mix(a, { 255, 255, 255 }, 0.5f), "GJ_button_02.png" };
-    }
-
-private:
-    static constexpr float W = 460.f;
-    static constexpr float H = 286.f;
-    static constexpr float SIDE = 120.f;
-    static constexpr float HEAD = 32.f;
-    static constexpr float FOOT = 22.f;
-
+    static constexpr float W = 300.f, H = 220.f;
     static inline AutoplayMenu* s_open = nullptr;
-    static inline int s_tab = 1;
-    static inline int s_back = 1;
-    static inline bool s_moved = false;
-    static inline CCPoint s_pos {};
+    CCLabelBMFont* m_status = nullptr;
+    ButtonSprite* m_startSprite = nullptr;
 
-    Theme m_t = currentTheme();
-    bool m_light = Mod::get()->getSavedValue<bool>("ui-light", false);
-    int m_bg = Mod::get()->getSavedValue<int>("ui-bg", 0);
-    ccColor3B m_text { 232, 234, 255 };
-    ccColor3B m_muted { 142, 148, 190 };
-    ccColor3B m_cyan { 110, 230, 255 };
-
-    CCMenu* m_frameMenu = nullptr;
-    CCNode* m_frame = nullptr;
-    CCNode* m_tabsNode = nullptr;
-    CCNode* m_page = nullptr;
-    CCMenu* m_pageMenu = nullptr;
-    CCLabelBMFont* m_chip = nullptr;
-    CCLabelBMFont* m_tpsLabel = nullptr;
-    CCLabelBMFont* m_scaleLabel = nullptr;
-    CCLabelBMFont* m_opacityLabel = nullptr;
-    std::vector<Option const*> m_options;
-    std::vector<CCDrawNode*> m_switches;
-    std::vector<CCLabelBMFont*> m_switchLabels;
-    bool m_dragging = false;
-    float m_shootTimer = 2.f;
-    CCNode* m_sky = nullptr;
-    // v3.2: the site's look: TV static, an eye in the logo that follows the cursor, eyes in the snow
-    CCSprite* m_static = nullptr;
-    float m_staticT = 0.f;
-    CCNode* m_eye = nullptr;
-    CCNode* m_eyeIris = nullptr;
-    float m_eyeW = 0.f, m_eyeX = 0.f, m_eyeY = 0.f, m_eyeTX = 0.f, m_eyeTY = 0.f, m_eyeWander = 0.f;
-    float m_blinkIn = 2.5f, m_blink = -1.f;
-    float m_ghostIn = 3.f;
-
-    static CCTexture2D* noiseTexture() {
-        static Ref<CCTexture2D> tex;
-        if (!tex) {
-            constexpr int N = 128;
-            std::vector<uint8_t> px(N * N * 4);
-            uint32_t seed = 2463534242u;
-            for (int i = 0; i < N * N; ++i) {
-                seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
-                float v = static_cast<float>(seed & 0xffff) / 65535.f;
-                uint8_t b = static_cast<uint8_t>(v * v * 235.f);
-                px[i * 4] = px[i * 4 + 1] = px[i * 4 + 2] = b;
-                px[i * 4 + 3] = 255;
-            }
-            auto* t = new CCTexture2D();
-            t->initWithData(px.data(), kCCTexture2DPixelFormat_RGBA8888, N, N, CCSize(N, N));
-            t->autorelease();
-            ccTexParams params { GL_NEAREST, GL_NEAREST, GL_REPEAT, GL_REPEAT };
-            t->setTexParameters(&params);
-            tex = t;
-        }
-        return tex;
-    }
-
-    static std::vector<CCPoint> almond(float w, float h, int n = 18) {
-        std::vector<CCPoint> pts;
-        auto bez = [](float a, float b, float c, float d, float t) {
-            float u = 1.f - t;
-            return u * u * u * a + 3 * u * u * t * b + 3 * u * t * t * c + t * t * t * d;
-        };
-        for (int i = 0; i <= n; ++i) {
-            float t = static_cast<float>(i) / n;
-            pts.push_back({ bez(-w / 2, -w * 0.31f, w * 0.31f, w / 2, t), bez(0, h * 0.87f, h * 0.87f, 0, t) });
-        }
-        for (int i = 1; i < n; ++i) {
-            float t = static_cast<float>(i) / n;
-            pts.push_back({ bez(w / 2, w * 0.31f, -w * 0.31f, -w / 2, t), bez(0, -h * 0.87f, -h * 0.87f, 0, t) });
-        }
-        return pts;
-    }
-
-    // an eye like the site's: white, a blue iris, a red pupil; `iris` gets the part that looks around
-    CCNode* makeEye(float w, CCNode** iris, ccColor3B irisColor = { 46, 107, 255 }, ccColor3B pupilColor = { 224, 20, 31 }) {
-        float h = w * 0.62f;
-        auto shape = almond(w, h / 2.f);
-        auto* eye = CCNode::create();
-        auto* stencil = CCDrawNode::create();
-        stencil->drawPolygon(shape.data(), static_cast<unsigned>(shape.size()), { 1, 1, 1, 1 }, 0.f, { 0, 0, 0, 0 });
-        auto* clip = CCClippingNode::create(stencil);
-        eye->addChild(clip);
-        auto* white = CCDrawNode::create();
-        white->drawPolygon(shape.data(), static_cast<unsigned>(shape.size()), { 0.95f, 0.95f, 0.96f, 1.f }, 0.f, { 0, 0, 0, 0 });
-        clip->addChild(white);
-        auto* look = CCDrawNode::create();
-        float r = h * 0.36f;
-        circle(look, { 0.f, 0.f }, r, col(irisColor, 1.f), 28, 0.8f, col({ 6, 16, 48 }, 1.f));
-        circle(look, { 0.f, 0.f }, r * 0.45f, col(pupilColor, 1.f), 20);
-        circle(look, { -r * 0.35f, r * 0.35f }, r * 0.2f, col({ 255, 255, 255 }, 0.85f), 12);
-        clip->addChild(look);
-        auto* rim = CCDrawNode::create();
-        rim->drawPolygon(shape.data(), static_cast<unsigned>(shape.size()), { 0, 0, 0, 0 }, 1.f, { 0.04f, 0.04f, 0.06f, 1.f });
-        eye->addChild(rim);
-        if (iris) {
-            *iris = look;
-        }
-        return eye;
-    }
-    // test 66: the online count in the footer
-    CCLabelBMFont* m_onlineLabel = nullptr;
-    CCDrawNode* m_onlineDot = nullptr;
-    float m_onlineTimer = 0.f;
-    // test 65: motion (page cascade, theme wipe, closing, the autoplay panel)
-    CCNode* m_side = nullptr;
-    bool m_closing = false;
-    bool m_wiping = false;
-    static inline bool s_sideOut = false;
-    static constexpr float PW = 150.f;
-    static constexpr float PH = 192.f;
-
-    static constexpr int TPS_MIN = 240;
-    static constexpr int TPS_MAX = 1000;
-
-    // ---------- drawing helpers ----------
-
-    // CCDrawNode blends premultiplied colours: a see-through colour has to be darkened by its alpha
-    static ccColor4F col(ccColor3B c, float a) {
-        return { c.r / 255.f * a, c.g / 255.f * a, c.b / 255.f * a, a };
-    }
-
-    static void circle(CCDrawNode* d, CCPoint c, float r, ccColor4F fill, int segments = 28, float border = 0.f,
-        ccColor4F borderColor = { 0, 0, 0, 0 }) {
-        std::vector<CCPoint> pts;
-        for (int i = 0; i < segments; ++i) {
-            float a = i * 2.f * 3.14159265f / segments;
-            pts.push_back({ c.x + r * std::cos(a), c.y + r * std::sin(a) });
-        }
-        d->drawPolygon(pts.data(), static_cast<unsigned>(pts.size()), fill, border, borderColor);
-    }
-
-    static void roundRect(CCDrawNode* d, CCRect r, float rad, ccColor4F fill, float border = 0.f, ccColor4F borderColor = { 0, 0, 0, 0 }) {
-        rad = std::min({ rad, r.size.width / 2.f, r.size.height / 2.f });
-        std::vector<CCPoint> pts;
-        CCPoint centers[] = { { r.getMaxX() - rad, r.getMaxY() - rad }, { r.getMinX() + rad, r.getMaxY() - rad },
-            { r.getMinX() + rad, r.getMinY() + rad }, { r.getMaxX() - rad, r.getMinY() + rad } };
-        for (int c = 0; c < 4; ++c) {
-            for (int i = 0; i <= 6; ++i) {
-                float a = (c * 90.f + i * 15.f) * 3.14159265f / 180.f;
-                CCPoint p { centers[c].x + rad * std::cos(a), centers[c].y + rad * std::sin(a) };
-                if (pts.empty() || ccpDistance(pts.back(), p) > 0.05f) {
-                    pts.push_back(p);
-                }
-            }
-        }
-        while (pts.size() > 2 && ccpDistance(pts.back(), pts.front()) <= 0.05f) {
-            pts.pop_back();
-        }
-        d->drawPolygon(pts.data(), static_cast<unsigned>(pts.size()), fill, border, borderColor);
-    }
-
-    // v3.2: the website's pixel TV font (VT323) in the dark look; Exo 2 / Orbitron in the light one
-    static inline bool s_siteFont = true;
-    static char const* bodyFont() {
-        return s_siteFont ? "vt323.fnt"_spr : "exo2.fnt"_spr;
-    }
-
-    static char const* headFont() {
-        return s_siteFont ? "vt323.fnt"_spr : "orbitron.fnt"_spr;
-    }
-
-    static float fontK() {
-        return s_siteFont ? 1.25f : 1.f;  // VT323's letters are smaller for the same size
-    }
-
-    static constexpr float HEAD_K = 0.8f;  // Orbitron is wide
-
-    CCLabelBMFont* label(CCNode* parent, std::string const& str, float scale, ccColor3B color, CCPoint at, CCPoint anchor = { 0.5f, 0.5f },
-        bool head = false) {
-        auto* l = CCLabelBMFont::create(str.c_str(), head ? headFont() : bodyFont());
-        l->setScale(scale * (head && !s_siteFont ? HEAD_K : 1.f) * fontK());
-        l->setColor(color);
-        l->setAnchorPoint(anchor);
-        l->setPosition(at);
-        parent->addChild(l, 3);
-        return l;
-    }
-
-    ccColor4F cardFill() const {
-        return m_light ? col({ 255, 255, 255 }, 0.55f) : col({ 44, 44, 52 }, 0.78f);
-    }
-
-    // a pill button: filled with the accent (primary), or glassy with an accent edge
-    CCMenuItemSpriteExtra* button(CCMenu* menu, std::string const& str, SEL_MenuHandler handler, CCPoint center, float width,
-        bool primary = false, int tag = 0, float height = 18.f, std::optional<ccColor3B> tint = std::nullopt) {
-        auto* node = CCNode::create();
-        node->setContentSize({ width, height });
-        auto* d = CCDrawNode::create();
-        ccColor3B base = tint.value_or(m_t.main);
-        if (primary) {
-            roundRect(d, { 0.f, 0.f, width, height }, height / 2.f, col(base, 0.9f), 0.6f, col(mix(base, { 255, 255, 255 }, 0.5f), 0.6f));
-        }
-        else {
-            roundRect(d, { 0.f, 0.f, width, height }, height / 2.f, tint ? col(base, 0.28f) : cardFill(), 0.6f, col(base, 0.55f));
-        }
-        node->addChild(d);
-        auto* l = CCLabelBMFont::create(str.c_str(), bodyFont());
-        l->setScale(0.5f * fontK());
-        l->setColor(primary ? ccColor3B { 255, 255, 255 } : m_text);
-        l->setPosition({ width / 2.f, height / 2.f + 0.5f });
-        l->limitLabelWidth(width - 8.f, 0.5f * fontK(), 0.2f);
-        node->addChild(l);
-        auto* item = CCMenuItemSpriteExtra::create(node, this, handler);
-        item->m_scaleMultiplier = 1.05f;
-        item->setTag(tag);
-        item->setPosition(center);
+    void addButton(CCMenu* menu, char const* text, SEL_MenuHandler action, CCPoint pos) {
+        auto* sprite = ButtonSprite::create(text, "goldFont.fnt", "GJ_button_04.png", 0.6f);
+        sprite->setScale(0.75f);
+        auto* item = CCMenuItemSpriteExtra::create(sprite, this, action);
+        item->setPosition(pos);
         menu->addChild(item);
-        return item;
-    }
-
-    void drawSwitch(CCDrawNode* d, bool on) {
-        d->clear();
-        roundRect(d, { 0.f, 0.f, 26.f, 13.f }, 6.5f, on ? col(m_t.main, 0.95f) : (m_light ? col({ 190, 188, 205 }, 0.95f) : col({ 70, 74, 110 }, 0.9f)),
-            0.5f, col(on ? m_t.soft : ccColor3B { 110, 115, 160 }, 0.6f));
-        circle(d, { on ? 19.5f : 6.5f, 6.5f }, 4.6f, col({ 255, 255, 255 }, on ? 1.f : 0.85f));
-    }
-
-    CCMenuItemSpriteExtra* switchItem(CCPoint center, bool on, SEL_MenuHandler handler, int tag, CCDrawNode** out) {
-        auto* node = CCNode::create();
-        node->setContentSize({ 26.f, 13.f });
-        auto* d = CCDrawNode::create();
-        node->addChild(d);
-        drawSwitch(d, on);
-        auto* item = CCMenuItemSpriteExtra::create(node, this, handler);
-        item->m_scaleMultiplier = 1.08f;
-        item->setTag(tag);
-        item->setPosition(center);
-        m_pageMenu->addChild(item);
-        if (out) {
-            *out = d;
-        }
-        return item;
-    }
-
-    static bool optionValue(Option const& o) {
-        return Mod::get()->getSettingValue<bool>(o.key);
-    }
-
-    // a setting row: name (and a grey line under it) on the left, switch on the right
-    void optionRow(Option const& o, float x, float y, float width, float rowH) {
-        auto* d0 = CCDrawNode::create();
-        roundRect(d0, { x, y - rowH / 2.f + 1.f, width, rowH - 2.f }, 6.f, m_light ? col({ 255, 255, 255 }, 0.6f) : col({ 255, 255, 255 }, 0.035f), 0.4f,
-            col(m_t.main, 0.25f));
-        m_page->addChild(d0, 1);
-        CCDrawNode* d = nullptr;
-        auto* sw = switchItem({ x + width - 18.f, y }, optionValue(o), menu_selector(AutoplayMenu::onToggle), static_cast<int>(m_options.size()), &d);
-        if (rowH < 17.f) {
-            sw->setScale(0.8f);
-            sw->m_baseScale = 0.8f;  // so a press doesn't spring it back to full size
-        }
-        bool two = o.sub && rowH >= 19.f;
-        float ls = rowH < 17.f ? 0.42f : 0.5f;
-        auto* l = label(m_page, o.label, ls, optionValue(o) ? m_text : m_muted, { x + 7.f, two ? y + 4.f : y }, { 0.f, 0.5f });
-        l->limitLabelWidth(width - 44.f, ls, 0.2f);
-        if (two) {
-            label(m_page, o.sub, 0.32f, m_muted, { x + 7.f, y - 5.5f }, { 0.f, 0.5f })->limitLabelWidth(width - 44.f, 0.32f, 0.15f);
-        }
-        m_options.push_back(&o);
-        m_switches.push_back(d);
-        m_switchLabels.push_back(l);
-    }
-
-    // a translucent card with a title in its top left corner
-    void card(CCRect r, std::string const& title = "", std::string const& right = "") {
-        auto* d = CCDrawNode::create();
-        if (m_light) {
-            roundRect(d, r, 9.f, cardFill(), 0.6f, col(m_t.main, 0.45f));
-        }
-        else {
-            // v3.2: an old TV like on the website: a dark case, a grey screen inside with scan lines
-            roundRect(d, { r.origin.x - 1.5f, r.origin.y - 1.5f, r.size.width + 3.f, r.size.height + 3.f }, 10.5f, col({ 22, 21, 26 }, 0.97f), 0.6f,
-                col({ 255, 255, 255 }, 0.08f));
-            CCRect in { r.origin.x + 2.f, r.origin.y + 2.f, r.size.width - 4.f, r.size.height - 4.f };
-            roundRect(d, in, 8.f, col({ 50, 51, 58 }, 0.92f), 0.5f, col({ 0, 0, 0 }, 0.7f));
-            for (float y = in.getMinY() + 2.f; y < in.getMaxY() - 2.f; y += 3.f) {
-                d->drawSegment({ in.getMinX() + 3.f, y }, { in.getMaxX() - 3.f, y }, 0.3f, { 0.f, 0.f, 0.f, 0.22f });
-            }
-        }
-        m_page->addChild(d, 1);
-        if (!title.empty()) {
-            label(m_page, title, 0.5f, m_text, { r.getMinX() + 9.f, r.getMaxY() - 10.f }, { 0.f, 0.5f });
-        }
-        if (!right.empty()) {
-            label(m_page, right, 0.36f, m_muted, { r.getMaxX() - 9.f, r.getMaxY() - 10.f }, { 1.f, 0.5f });
-        }
-    }
-
-    float contentX() const {
-        return SIDE + 6.f;
-    }
-
-    float contentW() const {
-        return W - SIDE - 14.f;
-    }
-
-    float contentTop() const {
-        return H - HEAD - 6.f;
-    }
-
-    // a small "- value +" stepper; returns the value label
-    CCLabelBMFont* stepper(CCPoint right, SEL_MenuHandler handler, int tagBase = 0) {
-        button(m_pageMenu, "-", handler, { right.x - 56.f, right.y }, 18.f, false, tagBase - 1, 16.f);
-        button(m_pageMenu, "+", handler, { right.x - 9.f, right.y }, 18.f, false, tagBase + 1, 16.f);
-        return label(m_page, "", 0.5f, m_text, { right.x - 32.5f, right.y });
-    }
-
-    static std::string platformName() {
-#if defined(GEODE_IS_WINDOWS)
-        return "Windows - 64-bit";
-#elif defined(GEODE_IS_ANDROID64)
-        return "Android - 64-bit";
-#elif defined(GEODE_IS_ANDROID32)
-        return "Android - 32-bit";
-#elif defined(GEODE_IS_IOS)
-        return "iOS";
-#elif defined(GEODE_IS_MACOS)
-        return "macOS";
-#else
-        return "";
-#endif
-    }
-
-    static std::string chipText() {
-        return autoplay.active ? "PLAYING" : "IDLE";
-    }
-
-    // ---------- the window ----------
-
-    void buildFrame() {
-        if (m_frame) {
-            m_frame->removeFromParent();
-        }
-        m_frame = CCNode::create();
-        m_mainLayer->addChild(m_frame, -3);
-        float opacity = std::clamp(Mod::get()->getSavedValue<float>("ui-opacity", 1.f), 0.5f, 1.f);
-
-        auto* glow = CCDrawNode::create();
-        for (int i = 7; i >= 1; --i) {
-            float g = i * 1.7f;
-            roundRect(glow, { -g, -g, W + 2.f * g, H + 2.f * g }, 14.f + g, col(m_t.main, 0.025f));
-        }
-        m_frame->addChild(glow, -3);
-
-        auto* stencil = CCDrawNode::create();
-        roundRect(stencil, { 0.f, 0.f, W, H }, 14.f, { 1, 1, 1, 1 });
-        auto* clip = CCClippingNode::create(stencil);
-        m_frame->addChild(clip, -2);
-        ccColor3B back = Mod::get()->hasSavedValue("ui-bg") ? BACKS[std::clamp(m_bg, 0, static_cast<int>(std::size(BACKS)) - 1)]
-                                                             : ccColor3B { 20, 20, 24 };  // v3.2: the website's near-black
-        GLubyte a = static_cast<GLubyte>(253 * opacity);
-        CCLayerGradient* sky = nullptr;
-        if (m_light) {
-            ccColor3B lo = mix({ 214, 208, 234 }, bright(back), 0.25f);
-            sky = CCLayerGradient::create({ 240, 237, 250, a }, { lo.r, lo.g, lo.b, a });
-        }
-        else {
-            sky = CCLayerGradient::create({ back.r, back.g, back.b, a },
-                { static_cast<GLubyte>(back.r / 3), static_cast<GLubyte>(back.g / 3), static_cast<GLubyte>(back.b / 3), a });
-        }
-        sky->setContentSize({ W, H });
-        clip->addChild(sky);
-        uint32_t seed = 1234567;
-        auto rnd = [&seed] {
-            seed = seed * 1103515245u + 12345u;
-            return static_cast<float>((seed >> 8) & 0xffff) / 65535.f;
-        };
-        m_static = nullptr;
-        if (!m_light) {
-            // v3.2: TV static over the background, with scan lines, like the website
-            m_static = CCSprite::createWithTexture(noiseTexture(), CCRect(0.f, 0.f, W, H));
-            m_static->setAnchorPoint({ 0.f, 0.f });
-            m_static->setOpacity(46);
-            clip->addChild(m_static);
-            auto* scan = CCDrawNode::create();
-            for (float y = 0.f; y < H; y += 3.f) {
-                scan->drawSegment({ 0.f, y }, { W, y }, 0.35f, { 0.f, 0.f, 0.f, 0.28f });
-            }
-            clip->addChild(scan);
-        }
-        if (false) {
-            // (the old stars, drifting slowly, twinkling)
-            for (int layer = 0; layer < 2; ++layer) {
-                auto* field = CCNode::create();
-                clip->addChild(field);
-                CCPoint by = layer == 0 ? CCPoint { -8.f, 3.f } : CCPoint { -18.f, 7.f };
-                float period = layer == 0 ? 22.f : 14.f;
-                field->runAction(CCRepeatForever::create(CCSequence::create(CCEaseSineInOut::create(CCMoveBy::create(period, by)),
-                    CCEaseSineInOut::create(CCMoveBy::create(period, ccpNeg(by))), nullptr)));
-                int count = layer == 0 ? 120 : 45;
-                for (int i = 0; i < count; ++i) {
-                    float size = layer == 0 ? 0.5f + rnd() * 0.5f : 0.9f + rnd() * 0.8f;
-                    auto* star = CCLayerColor::create({ 255, 255, 255, 255 }, size, size);
-                    star->setPosition({ rnd() * (W + 50.f) - 25.f, rnd() * (H + 30.f) - 15.f });
-                    float r = rnd();
-                    star->setColor(r < 0.15f ? m_cyan : r < 0.3f ? m_t.soft : ccColor3B { 255, 255, 255 });
-                    GLubyte hi = static_cast<GLubyte>((layer == 0 ? 100 : 160) + rnd() * 85);
-                    GLubyte lo = static_cast<GLubyte>(15 + rnd() * 45);
-                    star->setOpacity(hi);
-                    float t = 0.6f + rnd() * 2.2f;
-                    star->runAction(CCRepeatForever::create(CCSequence::create(CCDelayTime::create(rnd() * 3.f),
-                        CCFadeTo::create(t, lo), CCFadeTo::create(t, hi), nullptr)));
-                    field->addChild(star);
-                }
-            }
-        }
-        // a big soft accent orb behind the content, like a planet glow
-        auto* orb = CCDrawNode::create();
-        for (int i = 10; i >= 1; --i) {
-            circle(orb, { W * 0.62f, H * 0.42f }, 18.f * i, col(m_t.main, m_light ? 0.012f : 0.018f), 48);
-        }
-        clip->addChild(orb);
-        m_sky = clip;
-
-        // the sidebar panel, the outer edge, the header line, the footer line
-        auto* chrome = CCDrawNode::create();
-        roundRect(chrome, { 0.f, 0.f, W, H }, 14.f, { 0, 0, 0, 0 }, 0.8f, col(m_t.main, 0.8f));
-        roundRect(chrome, { 6.f, 6.f, SIDE - 8.f, H - 12.f }, 11.f, m_light ? col({ 255, 255, 255 }, 0.45f) : col({ 0, 0, 0 }, 0.3f), 0.6f,
-            col(m_t.main, 0.35f));
-        m_frame->addChild(chrome, -1);
-        auto* line = CCLayerGradient::create({ m_t.main.r, m_t.main.g, m_t.main.b, 230 }, { m_t.soft.r, m_t.soft.g, m_t.soft.b, 40 }, { 1.f, 0.f });
-        line->setContentSize({ W - SIDE - 14.f, 1.5f });
-        line->setPosition({ SIDE + 6.f, H - HEAD });
-        m_frame->addChild(line, -1);
-        auto* foot = CCLayerColor::create({ m_t.main.r, m_t.main.g, m_t.main.b, 60 }, W - SIDE - 14.f, 0.6f);
-        foot->setPosition({ SIDE + 6.f, FOOT });
-        m_frame->addChild(foot, -1);
-        // test 66: who's online (from the CBF server)
-        m_onlineLabel = label(m_frame, online::text(), 0.34f, m_muted, { W - 32.f, FOOT / 2.f + 1.f }, { 1.f, 0.5f });
-        m_onlineDot = CCDrawNode::create();
-        circle(m_onlineDot, { 0.f, 0.f }, 2.6f, col({ 102, 224, 154 }, 1.f), 14);
-        m_frame->addChild(m_onlineDot);
-        m_onlineDot->setVisible(false);
-        refreshOnline();
-
-        // the logo (v3.2): an eye that follows your cursor and blinks, CBF next to it, the version under
-        m_eyeW = 30.f;
-        m_eye = makeEye(m_eyeW, &m_eyeIris);
-        m_eye->setPosition({ 13.f + m_eyeW / 2.f, H - 27.f });
-        m_frame->addChild(m_eye, 2);
-        for (int i = 3; i >= 1; --i) {
-            auto* g = label(m_frame, "CBF", 0.95f + i * 0.04f, m_t.main, { 48.f - i * 1.2f, H - 25.f }, { 0.f, 0.5f }, true);
-            g->setOpacity(static_cast<GLubyte>(35 / i));
-        }
-        label(m_frame, "CBF", 0.95f, m_light ? m_t.main : m_t.soft, { 48.f, H - 25.f }, { 0.f, 0.5f }, true);
-        label(m_frame, Mod::get()->getVersion().toVString(), 0.3f, m_muted, { 48.f, H - 43.f }, { 0.f, 0.5f }, true)
-            ->limitLabelWidth(SIDE - 56.f, 0.3f, 0.15f);
-        auto* sep = CCLayerColor::create({ m_t.main.r, m_t.main.g, m_t.main.b, 110 }, SIDE - 28.f, 1.f);
-        sep->setPosition({ 14.f, H - 52.f });
-        m_frame->addChild(sep);
-
-        // the theme box at the bottom of the sidebar
-        auto* box = CCDrawNode::create();
-        roundRect(box, { 12.f, 30.f, SIDE - 20.f, 96.f }, 9.f, m_light ? col({ 255, 255, 255 }, 0.6f) : col({ 255, 255, 255 }, 0.04f), 0.6f,
-            col(m_t.main, 0.45f));
-        m_frame->addChild(box);
-        label(m_frame, platformName(), 0.4f, m_muted, { SIDE / 2.f + 1.f, 17.f });
-
-        if (m_frameMenu) {
-            m_frameMenu->removeFromParent();
-        }
-        m_frameMenu = CCMenu::create();
-        m_frameMenu->setPosition({ 0.f, 0.f });
-        m_mainLayer->addChild(m_frameMenu, 5);
-
-        // dark / light: a pill with a moon and a sun, the picked half filled
-        {
-            float bw = SIDE - 32.f;
-            auto* node = CCNode::create();
-            node->setContentSize({ bw, 16.f });
-            auto* d = CCDrawNode::create();
-            roundRect(d, { 0.f, 0.f, bw, 16.f }, 8.f, m_light ? col({ 200, 196, 215 }, 0.8f) : col({ 0, 0, 0 }, 0.35f), 0.5f, col(m_t.main, 0.5f));
-            roundRect(d, { m_light ? bw / 2.f : 0.f, 0.f, bw / 2.f, 16.f }, 8.f, col(m_t.main, 0.95f));
-            // v3.2: dark: a switched-off TV (black screen, a dot of light); light: a TV with a white screen
-            auto tv = [&](CCPoint c, bool on) {
-                ccColor4F body = col({ 255, 255, 255 }, 0.95f), dark = col({ 14, 13, 18 }, 1.f);
-                roundRect(d, { c.x - 7.f, c.y - 4.6f, 14.f, 9.2f }, 2.2f, col({ 34, 32, 40 }, 1.f), 0.55f, body);
-                roundRect(d, { c.x - 5.6f, c.y - 3.3f, 9.4f, 6.6f }, 1.6f, on ? col({ 255, 255, 255 }, 1.f) : dark, 0.35f, col({ 0, 0, 0 }, 1.f));
-                if (on) {
-                    for (float y = c.y - 2.6f; y < c.y + 3.f; y += 1.4f) {
-                        d->drawSegment({ c.x - 5.f, y }, { c.x + 3.2f, y }, 0.2f, col({ 170, 170, 185 }, 0.6f));
-                    }
-                }
-                else {
-                    circle(d, { c.x - 0.9f, c.y }, 0.6f, col({ 255, 255, 255 }, 0.9f), 8);
-                }
-                circle(d, { c.x + 5.3f, c.y + 1.4f }, 0.7f, col({ 200, 200, 210 }, 1.f), 8);
-                circle(d, { c.x + 5.3f, c.y - 1.2f }, 0.7f, on ? col({ 255, 46, 59 }, 1.f) : col({ 90, 90, 100 }, 1.f), 8);
-                d->drawSegment({ c.x - 1.5f, c.y + 4.6f }, { c.x - 4.f, c.y + 7.2f }, 0.35f, body);
-                d->drawSegment({ c.x + 1.5f, c.y + 4.6f }, { c.x + 4.f, c.y + 7.2f }, 0.35f, body);
-            };
-            tv({ bw * 0.25f, 7.f }, false);
-            tv({ bw * 0.75f, 7.f }, true);
-            node->addChild(d);
-            auto* item = CCMenuItemSpriteExtra::create(node, this, menu_selector(AutoplayMenu::onLight));
-            item->m_scaleMultiplier = 1.04f;
-            item->setPosition({ SIDE / 2.f + 1.f, 112.f });
-            m_frameMenu->addChild(item);
-        }
-        label(m_frame, "Accent", 0.36f, m_muted, { 20.f, 97.f }, { 0.f, 0.5f });
-        label(m_frame, "Background", 0.36f, m_muted, { 20.f, 64.f }, { 0.f, 0.5f });
-        int accent = Mod::get()->getSavedValue<int>("ui-accent", 0);
-        float step = (SIDE - 40.f) / 6.f;
-        for (int i = 0; i < 7; ++i) {
-            bool custom = i == 6;
-            ccColor3B c = custom ? hueColor(Mod::get()->getSavedValue<int>("ui-accent-hue", 262)) : ACCENTS[i];
-            dot({ 22.f + i * step, 84.f }, c, accent == i, custom, menu_selector(AutoplayMenu::onAccent), i);
-            dot({ 22.f + i * step, 51.f }, bright(BACKS[i]), m_bg == i, false, menu_selector(AutoplayMenu::onBack), i);
-        }
-
-        // header: the autoplay chip and the close button; footer: the hint and the settings gear
-        m_chip = nullptr;
-        buildHeaderButtons();
-        label(m_frame, "PAUSE MENU BUTTON OR MENU KEY TO TOGGLE", 0.32f, m_muted, { SIDE + 12.f, FOOT / 2.f + 1.f }, { 0.f, 0.5f }, true);
-        {
-            auto* node = CCNode::create();
-            node->setContentSize({ 16.f, 16.f });
-            auto* d = CCDrawNode::create();
-            circle(d, { 8.f, 8.f }, 7.5f, cardFill(), 28, 0.5f, col(m_t.main, 0.7f));
-            for (int i = 0; i < 8; ++i) {
-                float an = i * 3.14159265f / 4.f;
-                d->drawSegment({ 8.f + 3.f * std::cos(an), 8.f + 3.f * std::sin(an) }, { 8.f + 5.2f * std::cos(an), 8.f + 5.2f * std::sin(an) }, 0.9f,
-                    col(m_text, 0.95f));
-            }
-            circle(d, { 8.f, 8.f }, 3.2f, col(m_text, 0.95f), 20);
-            circle(d, { 8.f, 8.f }, 1.5f, m_light ? col({ 230, 228, 240 }, 1.f) : col({ 20, 16, 34 }, 1.f), 14);
-            node->addChild(d);
-            auto* item = CCMenuItemSpriteExtra::create(node, this, menu_selector(AutoplayMenu::onSettings));
-            item->setPosition({ W - 18.f, FOOT / 2.f + 1.f });
-            m_frameMenu->addChild(item);
-        }
-    }
-
-    // v3.2: each colour is an eye with that colour as its iris; the picked one is wide open and ringed
-    void dot(CCPoint at, ccColor3B c, bool picked, bool plus, SEL_MenuHandler handler, int tag) {
-        auto* node = CCNode::create();
-        node->setContentSize({ 12.f, 12.f });
-        auto* d = CCDrawNode::create();
-        // (almond's height is its curves' pull: the eye is about 0.65 of it tall each way)
-        float w = picked ? 13.f : 11.f, h = picked ? 6.6f : 5.6f;
-        auto shape = almond(w, h);
-        for (auto& p : shape) {
-            p = p + CCPoint { 6.f, 6.f };
-        }
-        if (picked) {
-            auto ring = almond(w + 3.f, h + 2.4f);
-            for (auto& p : ring) {
-                p = p + CCPoint { 6.f, 6.f };
-            }
-            d->drawPolygon(ring.data(), static_cast<unsigned>(ring.size()), col(m_light ? ccColor3B { 40, 30, 60 } : ccColor3B { 255, 255, 255 }, 0.9f), 0.f,
-                { 0, 0, 0, 0 });
-        }
-        d->drawPolygon(shape.data(), static_cast<unsigned>(shape.size()), { 0.95f, 0.95f, 0.96f, 1.f }, 0.5f, { 0.05f, 0.05f, 0.07f, 1.f });
-        float r = picked ? 3.1f : 2.6f;
-        circle(d, { 6.f, 6.f }, r, col(c, 1.f), 18);
-        circle(d, { 6.f, 6.f }, r * 0.42f, col({ 8, 8, 10 }, 1.f), 12);
-        circle(d, { 5.f, 7.f }, r * 0.25f, col({ 255, 255, 255 }, 0.85f), 8);
-        if (plus) {
-            d->drawSegment({ 4.2f, 6.f }, { 7.8f, 6.f }, 0.5f, col({ 255, 255, 255 }, 1.f));
-            d->drawSegment({ 6.f, 4.2f }, { 6.f, 7.8f }, 0.5f, col({ 255, 255, 255 }, 1.f));
-        }
-        node->addChild(d);
-        auto* item = CCMenuItemSpriteExtra::create(node, this, handler);
-        item->m_scaleMultiplier = 1.2f;
-        item->setTag(tag);
-        item->setPosition(at);
-        m_frameMenu->addChild(item);
-    }
-
-    CCNode* m_headButtons = nullptr;
-
-    void buildHeaderButtons() {
-        if (m_headButtons) {
-            m_headButtons->removeFromParent();
-        }
-        m_headButtons = CCNode::create();
-        m_mainLayer->addChild(m_headButtons, 6);
-        auto* menu = CCMenu::create();
-        menu->setPosition({ 0.f, 0.f });
-        m_headButtons->addChild(menu);
-        // close: a ring with an x
-        auto* node = CCNode::create();
-        node->setContentSize({ 18.f, 18.f });
-        auto* d = CCDrawNode::create();
-        circle(d, { 9.f, 9.f }, 8.f, cardFill(), 28, 0.5f, col(m_t.main, 0.8f));
-        d->drawSegment({ 6.2f, 6.2f }, { 11.8f, 11.8f }, 0.6f, col(m_text, 0.95f));
-        d->drawSegment({ 6.2f, 11.8f }, { 11.8f, 6.2f }, 0.6f, col(m_text, 0.95f));
-        node->addChild(d);
-        auto* close = CCMenuItemSpriteExtra::create(node, this, menu_selector(AutoplayMenu::onCloseButton));
-        close->setPosition({ W - 18.f, H - HEAD / 2.f });
-        menu->addChild(close);
-        // the autoplay chip (playing / idle): tap it to go to the Autoplay page
-        std::string chip = chipText();
-        float cw = std::max(46.f, 12.f + chip.size() * 7.f);
-        auto* cnode = CCNode::create();
-        cnode->setContentSize({ cw, 16.f });
-        auto* cd = CCDrawNode::create();
-        roundRect(cd, { 0.f, 0.f, cw, 16.f }, 8.f, cardFill(), 0.6f, col(m_t.main, 0.8f));
-        cnode->addChild(cd);
-        m_chip = CCLabelBMFont::create(chip.c_str(), headFont());
-        m_chip->setScale(s_siteFont ? 0.42f : 0.32f);
-        m_chip->setColor(m_text);
-        m_chip->setPosition({ cw / 2.f, 8.5f });
-        cnode->addChild(m_chip);
-        auto* chipItem = CCMenuItemSpriteExtra::create(cnode, this, menu_selector(AutoplayMenu::onChip));
-        chipItem->setPosition({ W - 38.f - cw / 2.f, H - HEAD / 2.f });
-        menu->addChild(chipItem);
-    }
-
-    void buildTabs() {
-        if (m_tabsNode) {
-            m_tabsNode->removeFromParent();
-        }
-        m_tabsNode = CCNode::create();
-        m_mainLayer->addChild(m_tabsNode, 4);
-        auto* menu = CCMenu::create();
-        menu->setPosition({ 0.f, 0.f });
-        m_tabsNode->addChild(menu);
-        for (int i = 0; i < static_cast<int>(std::size(TABS)); ++i) {
-            float th = 19.f;
-            float y = H - 63.f - i * 21.5f;
-            bool active = i == s_tab || (s_tab >= TAB_SETTINGS && i == s_back);
-            float tw = SIDE - 22.f;
-            auto* node = CCNode::create();
-            node->setContentSize({ tw, th });
-            auto* d = CCDrawNode::create();
-            if (active) {
-                roundRect(d, { 0.f, 0.f, tw, th }, 7.f, col(m_t.main, m_light ? 0.25f : 0.22f), 0.6f, col(m_t.main, 0.7f));
-            }
-            circle(d, { 10.f, th / 2.f }, 2.2f, active ? col(m_t.soft, 1.f) : col(m_muted, 0.7f), 14);
-            node->addChild(d);
-            auto* l = CCLabelBMFont::create(TABS[i], bodyFont());
-            l->setScale(0.56f * fontK());
-            l->limitLabelWidth(tw - 26.f, 0.56f * fontK(), 0.2f);
-            l->setColor(active ? m_text : m_muted);
-            l->setAnchorPoint({ 0.f, 0.5f });
-            l->setPosition({ 19.f, th / 2.f + 0.5f });
-            node->addChild(l);
-            auto* item = CCMenuItemSpriteExtra::create(node, this, menu_selector(AutoplayMenu::onTab));
-            item->m_scaleMultiplier = 1.04f;
-            item->setTag(i);
-            item->setPosition({ SIDE / 2.f + 1.f, y });
-            menu->addChild(item);
-        }
-    }
-
-    // ---------- pages ----------
-
-    void pageTitle(std::string const& t) {
-        label(m_page, t, 0.7f, m_text, { SIDE + 12.f, H - HEAD / 2.f }, { 0.f, 0.5f });
-    }
-
-    void pageLog() {
-        pageTitle("Log");
-        float x = contentX(), w = contentW(), top = contentTop();
-        float bottom = FOOT + 30.f;
-        card({ x, bottom, w, top - bottom }, "What autoplay did", "newest at the bottom");
-        size_t rows = 15;
-        size_t n = exportLines.size();
-        size_t first = n > rows ? n - rows : 0;
-        float y = top - 24.f;
-        if (n == 0) {
-            label(m_page, "Nothing yet: start autoplay in a level and what it does shows up here.", 0.42f, m_muted, { x + 10.f, y }, { 0.f, 0.5f });
-        }
-        for (size_t i = first; i < n; ++i) {
-            auto* l = label(m_page, exportLines[i], 0.34f, i + 1 == n ? m_text : m_muted, { x + 10.f, y }, { 0.f, 0.5f });
-            l->limitLabelWidth(w - 20.f, 0.34f, 0.15f);
-            y -= 11.f;
-        }
-        float bw = (w - 12.f) / 3.f;
-        float by = FOOT + 15.f;
-        button(m_pageMenu, "Copy Log", menu_selector(AutoplayMenu::onCopyLog), { x + bw / 2.f, by }, bw, true);
-        button(m_pageMenu, buf.panelOpen ? "Hide On Screen" : "Show On Screen", menu_selector(AutoplayMenu::onConsole), { x + bw * 1.5f + 6.f, by }, bw);
-        button(m_pageMenu, "All Settings", menu_selector(AutoplayMenu::onAllSettings), { x + bw * 2.5f + 12.f, by }, bw);
-    }
-
-    void pageAutoplay() {
-        pageTitle("Autoplay");
-        float x = contentX(), w = contentW(), top = contentTop();
-        float colW = (w - 6.f) / 2.f;
-        // autoplay itself (left)
-        card({ x, FOOT + 6.f, colW, top - FOOT - 6.f }, "Autoplay", "for showcases");
-        label(m_page, "Plays the level for you to record a showcase.", 0.38f, m_text, { x + 9.f, top - 30.f }, { 0.f, 0.5f })
-            ->limitLabelWidth(colW - 18.f, 0.38f, 0.15f);
-        label(m_page, "Nothing it plays is saved as progress, and", 0.36f, m_muted, { x + 9.f, top - 44.f }, { 0.f, 0.5f })
-            ->limitLabelWidth(colW - 18.f, 0.36f, 0.15f);
-        label(m_page, "AUTOPLAY stays on screen while it runs.", 0.36f, m_muted, { x + 9.f, top - 55.f }, { 0.f, 0.5f })
-            ->limitLabelWidth(colW - 18.f, 0.36f, 0.15f);
-        bool inLevel = GameManager::get()->m_playLayer != nullptr;
-        button(m_pageMenu, autoplay.active ? "Stop Autoplay" : "Start Autoplay", menu_selector(AutoplayMenu::onAutoplay),
-            { x + colW / 2.f, top - 82.f }, colW - 16.f, !autoplay.active, 0, 22.f,
-            autoplay.active ? std::optional<ccColor3B>(ccColor3B { 235, 80, 90 }) : std::nullopt);
-        label(m_page,
-            autoplay.active ? fmt::format("Playing - {} inputs so far. Your clicks are ignored.", autoplay.inputs)
-                            : inLevel ? std::string("Starts from where you are. Close the menu to watch.")
-                                      : std::string("Open a level, then start it from the pause menu."),
-            0.36f, m_muted, { x + colW / 2.f, top - 102.f })->limitLabelWidth(colW - 16.f, 0.36f, 0.15f);
-        label(m_page, "Not for platformer levels. 2-player: with a macro.", 0.34f, m_muted, { x + colW / 2.f, top - 114.f })
-            ->limitLabelWidth(colW - 16.f, 0.34f, 0.15f);
-        {
-            float y = top - 136.f;
-            auto* d0 = CCDrawNode::create();
-            roundRect(d0, { x + 5.f, y - 11.f, colW - 10.f, 22.f }, 6.f, m_light ? col({ 255, 255, 255 }, 0.6f) : col({ 255, 255, 255 }, 0.035f), 0.4f,
-                col(m_t.main, 0.25f));
-            m_page->addChild(d0, 1);
-            bool on = Mod::get()->getSavedValue<bool>("autoplay-takeover", false);
-            label(m_page, "Take Over", 0.5f, on ? m_text : m_muted, { x + 12.f, y + 4.f }, { 0.f, 0.5f });
-            label(m_page, "Your clicks first, it plays on when you stop", 0.3f, m_muted, { x + 12.f, y - 5.5f }, { 0.f, 0.5f })
-                ->limitLabelWidth(colW - 50.f, 0.3f, 0.15f);
-            switchItem({ x + colW - 23.f, y }, on, menu_selector(AutoplayMenu::onTakeOver), 0, nullptr);
-        }
-        float bw = (colW - 22.f) / 2.f;
-        button(m_pageMenu, "Forget Level", menu_selector(AutoplayMenu::onForget), { x + 8.f + bw / 2.f, FOOT + 20.f }, bw);
-        button(m_pageMenu, buf.panelOpen ? "Hide On Screen" : "Show On Screen", menu_selector(AutoplayMenu::onConsole),
-            { x + 14.f + bw * 1.5f, FOOT + 20.f }, bw);
-
-        // macros and the global brain (right)
-        float rx = x + colW + 6.f;
-        card({ rx, FOOT + 6.f, colW, top - FOOT - 6.f }, "Macros", "and the global brain");
-        for (size_t i = 0; i < std::size(AUTOPLAY_OPTIONS); ++i) {
-            optionRow(AUTOPLAY_OPTIONS[i], rx + 5.f, top - 30.f - i * 23.f, colW - 10.f, 22.f);
-        }
-        button(m_pageMenu, "Choose Macro", menu_selector(AutoplayMenu::onChooseMacro), { rx + colW / 2.f, FOOT + 44.f }, colW - 16.f, true);
-        button(m_pageMenu, "Macros Folder", menu_selector(AutoplayMenu::onMacros), { rx + 8.f + bw / 2.f, FOOT + 20.f }, bw);
-        button(m_pageMenu, "Forget Macro", menu_selector(AutoplayMenu::onForgetMacro), { rx + 14.f + bw * 1.5f, FOOT + 20.f }, bw);
-    }
-
-
-    void pageSettings() {
-        pageTitle("Settings");
-        float x = contentX(), w = contentW(), top = contentTop();
-        button(m_pageMenu, "Done", menu_selector(AutoplayMenu::onDone), { W - 98.f - 30.f, H - HEAD / 2.f }, 50.f, true, 0, 16.f);
-        float colW = (w - 6.f) / 2.f;
-        // window (left)
-        card({ x, FOOT + 6.f, colW, top - FOOT - 6.f }, "Window");
-        float y = top - 28.f;
-        {
-            auto* d0 = CCDrawNode::create();
-            m_page->addChild(d0, 1);
-            CCDrawNode* sw = nullptr;
-            roundRect(d0, { x + 5.f, y - 10.f, colW - 10.f, 20.f }, 6.f, m_light ? col({ 255, 255, 255 }, 0.6f) : col({ 255, 255, 255 }, 0.035f), 0.4f,
-                col(m_t.main, 0.25f));
-            label(m_page, "Pause Menu Button", 0.48f, m_text, { x + 12.f, y + 3.5f }, { 0.f, 0.5f });
-            label(m_page, "The button in the pause menu", 0.3f, m_muted, { x + 12.f, y - 5.f }, { 0.f, 0.5f });
-            switchItem({ x + colW - 23.f, y }, Mod::get()->getSavedValue<bool>("pause-button", true), menu_selector(AutoplayMenu::onPauseButton), 0, &sw);
-            y -= 21.f;
-        }
-        auto row = [&](char const* name) {
-            auto* d0 = CCDrawNode::create();
-            roundRect(d0, { x + 5.f, y - 9.f, colW - 10.f, 18.f }, 6.f, m_light ? col({ 255, 255, 255 }, 0.6f) : col({ 255, 255, 255 }, 0.035f), 0.4f,
-                col(m_t.main, 0.25f));
-            m_page->addChild(d0, 1);
-            label(m_page, name, 0.48f, m_text, { x + 12.f, y }, { 0.f, 0.5f });
-        };
-        row("Window Size");
-        m_scaleLabel = stepper({ x + colW - 9.f, y }, menu_selector(AutoplayMenu::onScale));
-        y -= 19.f;
-        row("Window Opacity");
-        m_opacityLabel = stepper({ x + colW - 9.f, y }, menu_selector(AutoplayMenu::onOpacity));
-        y -= 19.f;
-        row("Physics TPS");
-        m_tpsLabel = stepper({ x + colW - 9.f, y }, menu_selector(AutoplayMenu::onTps));
-        // prediction (right)
-        float rx = x + colW + 6.f;
-        card({ rx, FOOT + 6.f, colW, top - FOOT - 6.f }, "Prediction", "autoplay's hidden player");
-        float ry = top - 30.f;
-        float prH = std::min(20.f, (ry - (FOOT + 40.f)) / (std::size(PREDICTION) - 0.5f));
-        for (size_t i = 0; i < std::size(PREDICTION); ++i) {
-            optionRow(PREDICTION[i], rx + 5.f, ry, colW - 10.f, prH);
-            ry -= prH;
-        }
-        // test 90: updates (from the CBF site) next to All Geode Settings
-        float hb = (colW - 22.f) / 2.f;
-        button(m_pageMenu, "All Geode Settings", menu_selector(AutoplayMenu::onAllSettings), { rx + 8.f + hb / 2.f, FOOT + 18.f }, hb);
-        button(m_pageMenu, updateButtonText(), menu_selector(AutoplayMenu::onUpdates), { rx + 14.f + hb * 1.5f, FOOT + 18.f }, hb, updateAvailable());
-    }
-
-    void rebuildPage() {
-        if (m_page) {
-            m_page->removeFromParent();
-        }
-        m_tpsLabel = m_scaleLabel = m_opacityLabel = nullptr;
-        m_options.clear();
-        m_switches.clear();
-        m_switchLabels.clear();
-        m_page = CCNode::create();
-        m_mainLayer->addChild(m_page, 3);
-        m_pageMenu = CCMenu::create();
-        m_pageMenu->setPosition({ 0.f, 0.f });
-        m_page->addChild(m_pageMenu, 5);
-
-        switch (s_tab) {
-            case 0: pageLog(); break;
-            case TAB_SETTINGS: pageSettings(); break;
-            default: pageAutoplay(); break;
-        }
-        buildTabs();
-        buildHeaderButtons();
-        cascadeIn();
-        buildSide();
-        handleTouchPriority(this);
-        refresh();
-    }
-
-    // ---------- test 65: motion ----------
-
-    // the page's pieces come in one after another from the top: cards first, then what's on them
-    void cascadeIn() {
-        auto pop = [this](CCNode* n) {
-            auto p = n->getPosition();
-            bool drawn = typeinfo_cast<CCDrawNode*>(n) != nullptr || n->getContentSize().width <= 0.f;
-            float delay = drawn ? 0.f : std::clamp((H - p.y) / H, 0.f, 1.f) * 0.14f;
-            n->setPosition(p + CCPoint { 0.f, -8.f });
-            CCFiniteTimeAction* move = CCEaseExponentialOut::create(CCMoveTo::create(0.32f, p));
-            if (!drawn) {
-                float sc = n->getScale();
-                n->setScale(sc * 0.9f);
-                move = CCSpawn::create(move, CCEaseBackOut::create(CCScaleTo::create(0.32f, sc)), nullptr);
-            }
-            n->runAction(CCSequence::create(CCDelayTime::create(delay), move, nullptr));
-        };
-        for (auto* n : CCArrayExt<CCNode*>(m_page->getChildren())) {
-            if (n != m_pageMenu) {
-                pop(n);
-            }
-        }
-        for (auto* n : CCArrayExt<CCNode*>(m_pageMenu->getChildren())) {
-            pop(n);
-        }
-    }
-
-    // a colour change: a band of the new colour sweeps over the window, the window changes under it
-    void wipe() {
-        if (m_wiping) {
-            rebuildAll();
-            return;
-        }
-        m_wiping = true;
-        auto t = currentTheme();
-        auto* grow = CCDrawNode::create();
-        roundRect(grow, { 0.f, 0.f, W, H }, 14.f, col(t.main, 0.95f));
-        grow->setScaleX(0.001f);
-        m_mainLayer->addChild(grow, 60);
-        grow->runAction(CCSequence::create(CCEaseSineIn::create(CCScaleTo::create(0.2f, 1.f, 1.f)),
-            CallFuncExt::create([this, t]() {
-                rebuildAll();
-                auto* shrink = CCDrawNode::create();
-                roundRect(shrink, { -W, 0.f, W, H }, 14.f, col(t.main, 0.95f));
-                shrink->setPositionX(W);
-                m_mainLayer->addChild(shrink, 61);
-                shrink->runAction(CCSequence::create(CCEaseSineOut::create(CCScaleTo::create(0.3f, 0.001f, 1.f)),
-                    CallFuncExt::create([this]() { m_wiping = false; }), CCRemoveSelf::create(), nullptr));
-            }),
-            CCRemoveSelf::create(), nullptr));
-    }
-
-    // autoplay's own panel slides out from under the window (on the side with room) while it plays
-    void buildSide() {
-        if (m_side) {
-            m_side->removeFromParent();
-            m_side = nullptr;
-        }
-        bool want = autoplay.active;
-        bool was = s_sideOut;
-        s_sideOut = want;
-        if (!want && !was) {
-            return;
-        }
-        auto win = CCDirector::get()->getWinSize();
-        bool right = m_mainLayer->convertToWorldSpace({ W + 8.f + PW, 0.f }).x <= win.width;
-        float outX = right ? W + 8.f : -8.f - PW;
-        float inX = right ? W - PW - 12.f : 12.f;
-        float y0 = H - HEAD - 4.f - PH;
-        auto* side = CCNode::create();
-        m_mainLayer->addChild(side, -5);
-        auto* d = CCDrawNode::create();
-        ccColor3B back = BACKS[std::clamp(m_bg, 0, static_cast<int>(std::size(BACKS)) - 1)];
-        roundRect(d, { 0.f, y0, PW, PH }, 11.f, m_light ? col({ 246, 245, 252 }, 0.98f) : col(back, 0.98f), 0.8f, col(m_t.main, 0.6f));
-        side->addChild(d);
-        label(side, "Autoplay", 0.55f, m_text, { 10.f, y0 + PH - 13.f }, { 0.f, 0.5f });
-        label(side, "test mode", 0.32f, m_t.main, { PW - 10.f, y0 + PH - 13.f }, { 1.f, 0.5f });
-        if (want) {
-            label(side, fmt::format("{} inputs played", autoplay.inputs), 0.36f, m_muted, { 10.f, y0 + PH - 30.f }, { 0.f, 0.5f })
-                ->limitLabelWidth(PW - 20.f, 0.36f, 0.15f);
-            label(side, autoplay.fromMacro.empty() ? std::string("AUTOPLAY stays on screen") : "macro: " + autoplay.fromMacro, 0.32f,
-                autoplay.fromMacro.empty() ? m_muted : m_cyan, { 10.f, y0 + PH - 42.f }, { 0.f, 0.5f })
-                ->limitLabelWidth(PW - 20.f, 0.32f, 0.15f);
-            auto* menu = CCMenu::create();
-            menu->setPosition({ 0.f, 0.f });
-            side->addChild(menu, 2);
-            bool take = Mod::get()->getSavedValue<bool>("autoplay-takeover", false);
-            button(menu, take ? "Take Over: On" : "Take Over: Off", menu_selector(AutoplayMenu::onTakeOver), { PW / 2.f, y0 + PH - 60.f }, PW - 20.f,
-                false, 0, 18.f, take ? std::optional<ccColor3B>(ccColor3B { 80, 200, 120 }) : std::nullopt);
-            button(menu, "Forget Level", menu_selector(AutoplayMenu::onForget), { PW / 2.f, y0 + PH - 82.f }, PW - 20.f);
-            button(menu, "Show On Screen", menu_selector(AutoplayMenu::onConsole), { PW / 2.f, y0 + PH - 104.f }, PW - 20.f);
-            button(menu, "Choose Macro", menu_selector(AutoplayMenu::onChooseMacro), { PW / 2.f, y0 + PH - 126.f }, PW - 20.f, true);  // alpha.31
-            float hb = (PW - 26.f) / 2.f;
-            button(menu, "Macros", menu_selector(AutoplayMenu::onMacros), { 10.f + hb / 2.f, y0 + PH - 148.f }, hb);
-            button(menu, "Forget Macro", menu_selector(AutoplayMenu::onForgetMacro), { 16.f + hb * 1.5f, y0 + PH - 148.f }, hb);
-            button(menu, "Stop Autoplay", menu_selector(AutoplayMenu::onAutoplay), { PW / 2.f, y0 + 18.f }, PW - 20.f, false, 0, 20.f,
-                ccColor3B { 235, 80, 90 });
-            side->setPositionX(was ? outX : inX);
-            if (!was) {
-                side->runAction(CCEaseExponentialOut::create(CCMoveTo::create(0.45f, { outX, 0.f })));
-            }
-            m_side = side;
-        }
-        else {
-            // autoplay just stopped: in it goes, then it's gone
-            side->setPositionX(outX);
-            side->runAction(CCSequence::create(CCEaseExponentialIn::create(CCMoveTo::create(0.3f, { inX, 0.f })), CCRemoveSelf::create(), nullptr));
-        }
-    }
-
-    // test 85: the game's popup opening scales the window to 1x, over your UI Scale (0.7 opened at
-    // full size): the opening is redone to your scale
-    void show() override {
-        Popup::show();
-        float sc = std::clamp(Mod::get()->getSavedValue<float>("ui-scale", 1.f), 0.4f, 1.3f);
-        m_mainLayer->stopAllActions();
-        m_mainLayer->setScale(sc * 0.85f);
-        m_mainLayer->runAction(CCEaseBackOut::create(CCScaleTo::create(0.25f, sc)));
-    }
-
-    // closing: the window shrinks back and fades, then goes
-    void keyBackClicked() override {
-        if (m_closing) {
-            return;
-        }
-        m_closing = true;
-        if (m_side) {
-            m_side->stopAllActions();
-            float x = m_side->getPositionX() > W / 2.f ? W - PW - 12.f : 12.f;
-            m_side->runAction(CCEaseExponentialIn::create(CCMoveTo::create(0.16f, { x, 0.f })));
-        }
-        float sc = m_mainLayer->getScale();
-        m_mainLayer->runAction(CCEaseBackIn::create(CCScaleTo::create(0.2f, sc * 0.8f)));
-        this->runAction(CCFadeTo::create(0.2f, 0));
-        Ref<AutoplayMenu> self = this;
-        this->runAction(CCSequence::create(CCDelayTime::create(0.21f), CallFuncExt::create([self]() {
-            Loader::get()->queueInMainThread([self]() { self->Popup::keyBackClicked(); });
-        }), nullptr));
     }
 
     void refresh() {
-        if (m_tpsLabel) {
-            m_tpsLabel->setString(fmt::format("{}", Mod::get()->getSettingValue<int64_t>("tps")).c_str());
+        bool inLevel = GameManager::get()->m_playLayer != nullptr;
+        if (m_status) {
+            m_status->setString(inLevel ? statusText().c_str() : "Open a level to start autoplay");
         }
-        if (m_scaleLabel) {
-            m_scaleLabel->setString(fmt::format("{:.1f}x", Mod::get()->getSavedValue<float>("ui-scale", 1.f)).c_str());
+        if (m_startSprite) {
+            m_startSprite->setString(autoplay.active ? "Stop Autoplay" : "Start Autoplay");
         }
-        if (m_opacityLabel) {
-            m_opacityLabel->setString(fmt::format("{:.0f}%", Mod::get()->getSavedValue<float>("ui-opacity", 1.f) * 100.f).c_str());
-        }
-        for (size_t i = 0; i < m_switches.size(); ++i) {
-            bool on = optionValue(*m_options[i]);
-            drawSwitch(m_switches[i], on);
-            m_switchLabels[i]->setColor(on ? m_text : m_muted);
-        }
-    }
-
-    void applyLook() {
-        m_t = currentTheme();
-        m_light = Mod::get()->getSavedValue<bool>("ui-light", false);
-        s_siteFont = !m_light;
-        m_bg = Mod::get()->getSavedValue<int>("ui-bg", 0);
-        if (m_light) {
-            m_text = { 34, 28, 56 };
-            m_muted = { 105, 100, 135 };
-            m_cyan = { 40, 120, 200 };
-        }
-        else {
-            m_text = { 236, 236, 255 };
-            m_muted = { 150, 150, 192 };
-            m_cyan = { 110, 230, 255 };
-        }
-        m_mainLayer->setScale(std::clamp(Mod::get()->getSavedValue<float>("ui-scale", 1.f), 0.4f, 1.3f));
-    }
-
-    void rebuildAll() {
-        applyLook();
-        buildFrame();
-        rebuildPage();
-    }
-
-    // ---------- motion: shooting stars ----------
-
-    void refreshOnline() {
-        if (!m_onlineLabel) {
-            return;
-        }
-        auto t = online::text();
-        m_onlineLabel->setString(t.c_str());
-        m_onlineDot->setVisible(!t.empty());
-        m_onlineDot->setPosition({ W - 37.f - m_onlineLabel->getScaledContentSize().width, FOOT / 2.f + 1.f });
-    }
-
-    void update(float dt) override {
-        m_onlineTimer += dt;
-        if (m_onlineTimer > 1.f) {
-            m_onlineTimer = 0.f;
-            refreshOnline();
-        }
-        // v3.2: the static moves, the logo eye looks at the cursor and blinks, eyes show up in the snow
-        m_staticT += dt;
-        if (m_static && m_staticT > 0.05f) {
-            m_staticT = 0.f;
-            m_static->setTextureRect(CCRect(static_cast<float>(std::rand() % 128), static_cast<float>(std::rand() % 128), W, H));
-        }
-        if (m_eye && m_eyeIris) {
-            CCPoint target { 0.f, 0.f };
-#ifdef GEODE_IS_DESKTOP
-            auto local = m_eye->convertToNodeSpace(geode::cocos::getMousePos());
-            float dist = std::max(1.f, ccpLength(local));
-            float k = std::min(1.f, dist / 160.f);
-            target = CCPoint(local.x / dist * m_eyeW * 0.2f * k, local.y / dist * m_eyeW * 0.09f * k);
-#else
-            m_eyeWander -= dt;
-            if (m_eyeWander <= 0.f) {
-                m_eyeWander = 1.2f + static_cast<float>(std::rand() % 200) / 100.f;
-                m_eyeTX = (static_cast<float>(std::rand() % 200) / 100.f - 1.f) * m_eyeW * 0.2f;
-                m_eyeTY = (static_cast<float>(std::rand() % 200) / 100.f - 1.f) * m_eyeW * 0.08f;
-            }
-            target = CCPoint(m_eyeTX, m_eyeTY);
-#endif
-            float a = std::min(1.f, dt * 12.f);
-            m_eyeX += (target.x - m_eyeX) * a;
-            m_eyeY += (target.y - m_eyeY) * a;
-            m_eyeIris->setPosition({ m_eyeX, m_eyeY });
-            m_blinkIn -= dt;
-            if (m_blinkIn <= 0.f && m_blink < 0.f) {
-                m_blink = 0.f;
-                m_blinkIn = 1.8f + static_cast<float>(std::rand() % 420) / 100.f;
-            }
-            if (m_blink >= 0.f) {
-                m_blink += dt / 0.22f;
-                float c = m_blink < 0.5f ? m_blink * 2.f : std::max(0.f, 2.f - m_blink * 2.f);
-                m_eye->setScaleY(std::max(0.05f, 1.f - c));
-                if (m_blink >= 1.f) {
-                    m_blink = -1.f;
-                    m_eye->setScaleY(1.f);
-                }
-            }
-        }
-        m_ghostIn -= dt;
-        if (m_ghostIn <= 0.f && m_sky && m_static) {
-            m_ghostIn = 2.5f + static_cast<float>(std::rand() % 400) / 100.f;
-            static constexpr ccColor3B IRIS[] = { { 46, 107, 255 }, { 159, 207, 42 }, { 255, 46, 59 }, { 122, 74, 34 }, { 200, 200, 210 } };
-            auto ic = IRIS[std::rand() % std::size(IRIS)];
-            float w = 16.f + static_cast<float>(std::rand() % 16);
-            auto* g = makeEye(w, nullptr, ic, ic.r > 200 && ic.g < 80 ? ccColor3B { 10, 0, 0 } : ccColor3B { 224, 20, 31 });
-            g->setPosition({ SIDE + 20.f + static_cast<float>(std::rand() % static_cast<int>(W - SIDE - 40.f)),
-                FOOT + 14.f + static_cast<float>(std::rand() % static_cast<int>(H - HEAD - FOOT - 28.f)) });
-            g->setScaleY(0.05f);
-            m_sky->addChild(g);
-            g->runAction(CCSequence::create(CCBlink::create(0.3f, 3), CCScaleTo::create(0.12f, 1.f, 1.f), CCDelayTime::create(1.1f),
-                CCScaleTo::create(0.08f, 1.f, 0.05f), CCScaleTo::create(0.1f, 1.f, 1.f), CCDelayTime::create(0.9f), CCBlink::create(0.25f, 3),
-                CCScaleTo::create(0.1f, 1.f, 0.02f), CCRemoveSelf::create(), nullptr));
-        }
-        m_shootTimer -= dt;
-        if (false && m_shootTimer <= 0.f && m_sky && !m_light) {
-            m_shootTimer = 3.5f + static_cast<float>(std::rand() % 400) / 100.f;
-            auto* streak = CCLayerGradient::create({ 255, 255, 255, 0 }, { 255, 255, 255, 220 }, { 1.f, 0.f });
-            streak->setContentSize({ 34.f, 1.2f });
-            streak->ignoreAnchorPointForPosition(false);
-            streak->setAnchorPoint({ 1.f, 0.5f });
-            float sx = 60.f + static_cast<float>(std::rand() % static_cast<int>(W - 60.f));
-            streak->setPosition({ sx, H + 10.f });
-            streak->setRotation(28.f);
-            m_sky->addChild(streak);
-            streak->runAction(CCSequence::create(
-                CCSpawn::create(CCMoveBy::create(0.9f, { -170.f, -90.f }), CCSequence::create(CCDelayTime::create(0.5f), CCFadeOut::create(0.4f), nullptr),
-                    nullptr),
-                CCRemoveSelf::create(), nullptr));
-        }
-    }
-
-    // ---------- dragging by the logo or the header ----------
-
-    bool ccTouchBegan(CCTouch* touch, CCEvent* event) override {
-        auto p = m_mainLayer->convertToNodeSpace(touch->getLocation());
-        bool logo = p.x >= 0.f && p.x <= SIDE && p.y >= H - 52.f && p.y <= H;
-        bool header = p.x >= SIDE + 100.f && p.x <= W - 150.f && p.y >= H - HEAD && p.y <= H;
-        if (logo || header) {
-            m_dragging = true;
-            return true;
-        }
-        return Popup::ccTouchBegan(touch, event);
-    }
-
-    void ccTouchMoved(CCTouch* touch, CCEvent* event) override {
-        if (!m_dragging) {
-            Popup::ccTouchMoved(touch, event);
-            return;
-        }
-        auto delta = touch->getLocation() - touch->getPreviousLocation();
-        m_mainLayer->setPosition(m_mainLayer->getPosition() + delta);
-        s_pos = m_mainLayer->getPosition();
-        s_moved = true;
-    }
-
-    void ccTouchEnded(CCTouch* touch, CCEvent* event) override {
-        if (m_dragging) {
-            m_dragging = false;
-            return;
-        }
-        Popup::ccTouchEnded(touch, event);
-    }
-
-    // ---------- actions ----------
-
-    void onCloseButton(CCObject*) {
-        keyBackClicked();
-    }
-
-    void onTab(CCObject* sender) {
-        s_tab = sender->getTag();
-        s_back = s_tab;
-        rebuildPage();
-    }
-
-    void onChip(CCObject*) {
-        s_tab = s_back = TAB_AUTOPLAY;
-        rebuildPage();
-    }
-
-    void onDone(CCObject*) {
-        s_tab = s_back;
-        rebuildPage();
     }
 
     void onSettings(CCObject*) {
-        if (s_tab < TAB_SETTINGS) {
-            s_back = s_tab;
-        }
-        s_tab = TAB_SETTINGS;
-        rebuildPage();
-    }
-
-    void onLight(CCObject*) {
-        Mod::get()->setSavedValue("ui-light", !Mod::get()->getSavedValue<bool>("ui-light", false));
-        wipe();
-    }
-
-    void onAccent(CCObject* sender) {
-        int i = sender->getTag();
-        if (i == 6) {
-            // the + dot: a colour of your own, each tap turns the hue a bit further
-            int hue = Mod::get()->getSavedValue<int>("ui-accent-hue", 262);
-            if (Mod::get()->getSavedValue<int>("ui-accent", 0) == 6) {
-                hue = (hue + 24) % 360;
-            }
-            Mod::get()->setSavedValue("ui-accent-hue", hue);
-        }
-        Mod::get()->setSavedValue("ui-accent", i);
-        wipe();
-    }
-
-    void onBack(CCObject* sender) {
-        Mod::get()->setSavedValue("ui-bg", sender->getTag());
-        wipe();
-    }
-
-    void onToggle(CCObject* sender) {
-        auto const& o = *m_options[sender->getTag()];
-        bool value = !optionValue(o);
-        Mod::get()->setSettingValue<bool>(o.key, value);
-        readSettings();
-        // the trail's switch works while autoplay plays
-        if (autoplay.active && autoplay.trailNode) {
-            autoplay.trailNode->setVisible(Mod::get()->getSettingValue<bool>("autoplay-trail"));
-        }
-        say("{} {}", o.label, value ? "on" : "off");
-        refresh();
-    }
-
-    void onPauseButton(CCObject*) {
-        bool on = !Mod::get()->getSavedValue<bool>("pause-button", true);
-        Mod::get()->setSavedValue("pause-button", on);
-        say("pause menu button {}", on ? "on" : "off (open the menu with its key)");
-        rebuildPage();
-    }
-
-    void onTps(CCObject* sender) {
-        int tps = static_cast<int>(Mod::get()->getSettingValue<int64_t>("tps"));
-        tps = std::clamp(tps + (sender->getTag() > 0 ? 20 : -20), TPS_MIN, TPS_MAX);
-        Mod::get()->setSettingValue<int64_t>("tps", tps);
-        refresh();
-    }
-
-    void onScale(CCObject* sender) {
-        float s = Mod::get()->getSavedValue<float>("ui-scale", 1.f) + (sender->getTag() > 0 ? 0.1f : -0.1f);
-        s = std::clamp(std::round(s * 10.f) / 10.f, 0.4f, 1.3f);
-        Mod::get()->setSavedValue("ui-scale", s);
-        m_mainLayer->setScale(s);
-        refresh();
-    }
-
-    void onOpacity(CCObject* sender) {
-        float o = Mod::get()->getSavedValue<float>("ui-opacity", 1.f) + (sender->getTag() > 0 ? 0.1f : -0.1f);
-        o = std::clamp(std::round(o * 10.f) / 10.f, 0.5f, 1.f);
-        Mod::get()->setSavedValue("ui-opacity", o);
-        buildFrame();
-        refresh();
-    }
-
-    void onAllSettings(CCObject*) {
         geode::openSettingsPopup(Mod::get());
-    }
-
-    void onCopyLog(CCObject*) {
-        exportConsole();
-    }
-
-    void onConsole(CCObject*) {
-        buf.panelOpen = !buf.panelOpen;
-        refreshPanel();
-        say("console {}", buf.panelOpen ? "shown" : "hidden");
-        rebuildPage();
-    }
-
-    // test 90: check for / install the newest version
-    void onUpdates(CCObject*) {
-        manualUpdate();
-        rebuildPage();
     }
 
     // v3.0.2: deletes this level's macro (the downloaded one, or yours named after the level) and its
@@ -8978,13 +7672,13 @@ private:
             }
         }
         say("autoplay take over {}", on ? "on (nothing is saved, the label stays on screen)" : "off");
-        rebuildPage();
+        refresh();
     }
 
     void onAutoplay(CCObject*) {
         if (autoplay.active) {
             stopAutoplay("");
-            rebuildPage();
+            refresh();
             return;
         }
         std::string why;
@@ -8992,7 +7686,7 @@ private:
             FLAlertLayer::create("Autoplay", why, "OK")->show();
             return;
         }
-        rebuildPage();
+        refresh();
     }
 
     // forgets what autoplay learned on this level (its inputs, its trail, the spots it marked);
@@ -9026,29 +7720,51 @@ private:
             drawTrail();
         }
         say("autoplay: {}", removed || playing ? "what it learned on this level is forgotten" : "nothing learned on this level yet");
-        rebuildPage();
+        refresh();
     }
 
 protected:
     bool init() {
-        if (!Popup::init(W, H, "GJ_square04.png")) {
+        if (!Popup::init(W, H, "GJ_square01.png")) {
             return false;
         }
-        m_bgSprite->setVisible(false);
-        if (m_closeBtn) {
-            m_closeBtn->setVisible(false);
-            m_closeBtn->setEnabled(false);
-        }
-        this->setOpacity(90);
-        if (s_moved) {
-            m_mainLayer->setPosition(s_pos);
-        }
+        this->setTitle("Autoplay");
         s_open = this;
-        s_sideOut = false;  // test 65: the autoplay panel slides out each time the window opens
-        applyLook();
-        buildFrame();
-        rebuildPage();
-        this->scheduleUpdate();
+        readSettings();
+
+        m_status = CCLabelBMFont::create("", "chatFont.fnt");
+        m_status->setScale(0.7f);
+        m_status->setPosition({ W / 2.f, H - 44.f });
+        m_mainLayer->addChild(m_status);
+
+        auto* menu = CCMenu::create();
+        menu->setPosition({ 0.f, 0.f });
+        menu->setContentSize({ W, H });
+        m_mainLayer->addChild(menu);
+
+        m_startSprite = ButtonSprite::create("Start Autoplay", "goldFont.fnt", "GJ_button_01.png", 0.8f);
+        auto* start = CCMenuItemSpriteExtra::create(m_startSprite, this, menu_selector(AutoplayMenu::onAutoplay));
+        start->setPosition({ W / 2.f, H - 76.f });
+        menu->addChild(start);
+
+        auto* toggle = CCMenuItemToggler::createWithStandardSprites(this, menu_selector(AutoplayMenu::onTakeOver), 0.6f);
+        toggle->toggle(Mod::get()->getSavedValue<bool>("autoplay-takeover", false));
+        toggle->setPosition({ W / 2.f - 74.f, H - 112.f });
+        menu->addChild(toggle);
+        auto* takeOver = CCLabelBMFont::create("Take Over (your clicks come first)", "bigFont.fnt");
+        takeOver->setScale(0.3f);
+        takeOver->setAnchorPoint({ 0.f, 0.5f });
+        takeOver->setPosition({ W / 2.f - 58.f, H - 112.f });
+        m_mainLayer->addChild(takeOver);
+
+        float left = W / 2.f - 68.f, right = W / 2.f + 68.f;
+        addButton(menu, "Choose Macro", menu_selector(AutoplayMenu::onChooseMacro), { left, H - 146.f });
+        addButton(menu, "Macros Folder", menu_selector(AutoplayMenu::onMacros), { right, H - 146.f });
+        addButton(menu, "Forget Level", menu_selector(AutoplayMenu::onForget), { left, H - 174.f });
+        addButton(menu, "Forget Macro", menu_selector(AutoplayMenu::onForgetMacro), { right, H - 174.f });
+        addButton(menu, "Settings", menu_selector(AutoplayMenu::onSettings), { W / 2.f, H - 202.f });
+
+        refresh();
         return true;
     }
 
@@ -9060,11 +7776,6 @@ public:
     }
 
     static AutoplayMenu* create() {
-        // v3.2: the menu starts at half size once (the UI Scale buttons still go from 0.4x to 1.3x)
-        if (!Mod::get()->getSavedValue<bool>("ui-v32-scale", false)) {
-            Mod::get()->setSavedValue("ui-scale", 0.5f);
-            Mod::get()->setSavedValue("ui-v32-scale", true);
-        }
         auto* ret = new AutoplayMenu();
         if (ret->init()) {
             ret->autorelease();
@@ -9077,47 +7788,12 @@ public:
     // the menu key again closes it
     static void open() {
         if (s_open) {
-            s_open->keyBackClicked();
+            s_open->onClose(nullptr);
             return;
         }
         if (auto* menu = create()) {
             menu->show();
         }
-    }
-};
-
-// the pause menu has a button for the menu (on phones, with no menu key, there is no other way
-// to open it inside a level). It is added by one function, from two places: on iOS the game
-// builds the pause menu with its setup inlined, so the customSetup hook alone never ran there;
-// PlayLayer::pauseGame (below) adds it after the pause menu is shown. Never added twice.
-static void addPauseButton(CCNode* pause) {
-    if (!pause || pause->getChildByID("click-before-frames-menu"_spr)) {
-        return;
-    }
-    // can be switched off in the menu's Settings (the menu key still opens it)
-    if (!Mod::get()->getSavedValue<bool>("pause-button", true)) {
-        return;
-    }
-    auto* sprite = cbfIcon(42.f);
-    if (!sprite) {
-        return;
-    }
-    auto* button = CCMenuItemExt::createSpriteExtra(sprite, [](CCMenuItemSpriteExtra*) {
-        AutoplayMenu::open();
-    });
-    button->setID("click-before-frames-button"_spr);
-    auto* menu = CCMenu::create();
-    menu->addChild(button);
-    auto win = CCDirector::get()->getWinSize();
-    menu->setPosition({ win.width - 40.f, 40.f });
-    menu->setID("click-before-frames-menu"_spr);
-    pause->addChild(menu, 10);
-}
-
-class $modify(BufPauseLayer, PauseLayer) {
-    void customSetup() {
-        PauseLayer::customSetup();
-        addPauseButton(this);
     }
 };
 
@@ -9432,18 +8108,6 @@ class $modify(BufPlayLayer, PlayLayer) {
         buf.appliedInput = gameHolds(m_player1);
         if (autoplay.active) {
             autoplayAttemptStart(this);
-        }
-    }
-
-    // v2.99.4: see addPauseButton (iOS never ran the PauseLayer::customSetup hook)
-    void pauseGame(bool unfocused) {
-        PlayLayer::pauseGame(unfocused);
-        if (auto* scene = CCDirector::get()->getRunningScene()) {
-            for (auto* child : CCArrayExt<CCNode*>(scene->getChildren())) {
-                if (typeinfo_cast<PauseLayer*>(child)) {
-                    addPauseButton(child);
-                }
-            }
         }
     }
 
@@ -9775,20 +8439,22 @@ class $modify(BufPlayerObject, PlayerObject) {
 };
 
 // v2.81: Geode keybinds (mod settings or Geode's keybinds popup; work without F keys too).
-// Only act inside a level.
+// The window opens anywhere; the other keys only act inside a level.
 namespace {
     void keyAction(int action) {
         auto* layer = GameManager::get()->m_playLayer;
+        if (action == 0) {
+            // the window opens anywhere (it is the only way in: there are no buttons for it)
+            if (layer && !layer->m_isPaused) {
+                layer->pauseGame(true);
+            }
+            AutoplayMenu::open();
+            return;
+        }
         if (!layer) {
             return;
         }
         switch (action) {
-            case 0:
-                if (!layer->m_isPaused) {
-                    layer->pauseGame(true);
-                }
-                AutoplayMenu::open();
-                break;
             case 1:
                 exportConsole();
                 break;
@@ -9813,7 +8479,7 @@ namespace {
 
     // v2.81 update check: once per game start, reads the version in the public repo's mod.json
     // (in the background) and says so on the main menu if a newer one is out.
-    constexpr char const* REPO_URL = "https://github.com/raresdalas1009/-predictive-input-buffer";
+    constexpr char const* REPO_URL = "https://github.com/ilovechubbyorangecat/-predictive-input-buffer";
     std::string latestVersion;
     bool updateChecked = false;
     bool updateShown = false;
@@ -9822,7 +8488,7 @@ namespace {
     // puts it in place of this one; the new version loads on the next start. The file is only
     // installed if it really is this mod and a newer version than the one running.
     constexpr bool INSTALL_UPDATES = true;
-    constexpr char const* RELEASE_API = "https://api.github.com/repos/raresdalas1009/-predictive-input-buffer/releases/latest";
+    constexpr char const* RELEASE_API = "https://api.github.com/repos/ilovechubbyorangecat/-predictive-input-buffer/releases/latest";
     bool updating = false;
     std::string latestAssetUrl;  // v2.98: the .geode of the release the popup is about
     std::string latestNotes;     // test 90: what's new, from the CBF site
@@ -9958,28 +8624,6 @@ namespace {
         return !latestVersion.empty() && !latestAssetUrl.empty();
     }
 
-    std::string updateButtonText() {
-        if (updating) {
-            return "Updating...";
-        }
-        return updateAvailable() ? "Update to " + latestVersion : std::string("Check for Updates");
-    }
-
-    void manualUpdate() {
-        if (updating) {
-            return;
-        }
-        if (updateAvailable()) {
-            installUpdate();
-            return;
-        }
-        updateAnywhere = true;
-        updateChecked = false;
-        updateShown = false;
-        say("update: checking...");
-        checkForUpdate();
-    }
-
     void checkForUpdate() {
         if (updateChecked || (!updateAnywhere && !Mod::get()->getSettingValue<bool>("check-updates"))) {
             return;
@@ -10081,25 +8725,12 @@ $on_mod(Loaded) {
     queueInMainThread([] { CBF_STEP("first frame"); });
 }
 
-// the main menu: a heart button that opens the menu (with the other buttons at the bottom),
-// and the update check
+// the main menu: the update check
 class $modify(BufMenuLayer, MenuLayer) {
     bool init() {
         CBF_STEP("main menu: game's menu");
         if (!MenuLayer::init()) {
             return false;
-        }
-        CBF_STEP("main menu: heart button");
-        auto* sprite = cbfIcon(46.f);  // test 91: the CBF icon (was a heart)
-        if (!sprite) {
-            geode::log::error("cbf-icon.png missing, no menu button");
-            return true;
-        }
-        auto* item = CCMenuItemSpriteExtra::create(sprite, this, menu_selector(BufMenuLayer::onAutoplayMenu));
-        item->setID("click-before-frames-button"_spr);
-        if (auto* bottom = this->getChildByID("bottom-menu")) {
-            bottom->addChild(item);
-            bottom->updateLayout();
         }
         CBF_STEP("main menu: update check");
         checkForUpdate();
@@ -10108,10 +8739,6 @@ class $modify(BufMenuLayer, MenuLayer) {
             queueInMainThread([] { showUpdatePopup(); });
         }
         return true;
-    }
-
-    void onAutoplayMenu(CCObject*) {
-        AutoplayMenu::open();
     }
 };
 
