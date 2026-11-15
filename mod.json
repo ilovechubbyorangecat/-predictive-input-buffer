@@ -7,10 +7,10 @@
 		"ios": "2.2081"
 	},
 	"version": "v3.2.0",
-	"id": "basu.input-buffer",
+	"id": "cat.autoplay",
 	"name": "Autoplay",
 	"developer": "Indonesiangamer777",
-	"description": "Autoplay for level showcases: plans a route while it plays, plays GDR / xdBot macros and runs shared on the global brain. Test mode: nothing is saved as progress. github.com/raresdalas1009/-predictive-input-buffer",
+	"description": "Autoplay for level showcases: plans a route while it plays, plays GDR / xdBot macros and runs shared on the global brain. Test mode: nothing is saved as progress. github.com/ilovechubbyorangecat/-predictive-input-buffer",
 	"settings": {
 		"autoplay-label": {
 			"type": "string",
@@ -110,8 +110,8 @@
 		},
 		"online-players": {
 			"type": "bool",
-			"name": "Show Online Players",
-			"description": "Shows how many Autoplay players are online in the window's footer. To count you, every 90 seconds the game sends the Click Before Frames server an anonymous random id, your device type and the mod's version. No name, account, level or gameplay. Turn it off and nothing is sent.",
+			"name": "Count Me As Online",
+			"description": "Counts you in the number of Autoplay players online. Every 90 seconds the game sends the Click Before Frames server an anonymous random id, your device type and the mod's version. No name, account, level or gameplay. Turn it off and nothing is sent.",
 			"default": true
 		},
 		"check-updates": {
@@ -123,10 +123,10 @@
 		"bind-menu": {
 			"type": "keybind",
 			"name": "Key: open menu",
-			"description": "Works inside a level. Change it here or in Geode's keybinds popup.",
+			"description": "Opens the Autoplay window, in a level or in the menus. It is the only way to open it. Change it here or in Geode's keybinds popup.",
 			"category": "gameplay",
 			"default": [
-				"Seven"
+				"Ctrl+Q"
 			]
 		},
 		"bind-export": {
@@ -169,26 +169,7 @@
 			]
 		}
 	},
-	"resources": {
-		"sprites": [
-			"resources/*.png"
-		],
-		"fonts": {
-			"orbitron": {
-				"path": "resources/fonts/Orbitron.ttf",
-				"size": 64
-			},
-			"exo2": {
-				"path": "resources/fonts/Exo2.ttf",
-				"size": 64
-			},
-			"vt323": {
-				"path": "resources/fonts/VT323.ttf",
-				"size": 64
-			}
-		}
-	},
 	"links": {
-		"source": "https://github.com/raresdalas1009/-predictive-input-buffer"
+		"source": "https://github.com/ilovechubbyorangecat/-predictive-input-buffer"
 	}
 }
